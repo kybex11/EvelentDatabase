@@ -1,0 +1,8 @@
+*/node_modules
+*/build
+*/dist
+*/.env
+data/*
+data/.key
+data
+*/package-lock.json
