@@ -23,6 +23,20 @@ export function GetServerURL():Promise<string>;
 
 export function InsertDocument(arg1:string,arg2:Record<string, any>):Promise<string>;
 
+export function KVDelete(arg1:string):Promise<void>;
+
+export function KVFlush():Promise<void>;
+
+export function KVGet(arg1:string):Promise<string>;
+
+export function KVIncr(arg1:string,arg2:number):Promise<number>;
+
+export function KVKeys(arg1:string):Promise<Array<string>>;
+
+export function KVSet(arg1:string,arg2:string,arg3:number):Promise<void>;
+
+export function KVStats():Promise<Record<string, any>>;
+
 export function ListCollections():Promise<Array<string>>;
 
 export function ListIndexes(arg1:string):Promise<Array<string>>;

@@ -8,13 +8,13 @@ import (
 
 type Index struct {
 	field string
-	data  map[interface{}][]string
+	data  map[string][]string
 }
 
 func NewIndex(field string) *Index {
 	return &Index{
 		field: field,
-		data:  make(map[interface{}][]string),
+		data:  make(map[string][]string),
 	}
 }
 
@@ -31,21 +31,14 @@ func LoadIndex(path string, encKey []byte) (*Index, error) {
 	if err := json.Unmarshal(plain, &idxData); err != nil {
 		return nil, err
 	}
-	idx := &Index{
-		data: make(map[interface{}][]string),
+	if idxData == nil {
+		idxData = make(map[string][]string)
 	}
-	for k, v := range idxData {
-		idx.data[k] = v
-	}
-	return idx, nil
+	return &Index{data: idxData}, nil
 }
 
 func (idx *Index) Save(path string, encKey []byte) error {
-	out := make(map[string][]string)
-	for k, v := range idx.data {
-		out[toString(k)] = v
-	}
-	data, err := json.Marshal(out)
+	data, err := json.Marshal(idx.data)
 	if err != nil {
 		return err
 	}
@@ -61,8 +54,9 @@ func (idx *Index) Insert(doc map[string]interface{}) {
 	if !ok {
 		return
 	}
+	key := toString(val)
 	id := docIDString(doc)
-	idx.data[val] = append(idx.data[val], id)
+	idx.data[key] = append(idx.data[key], id)
 }
 
 func (idx *Index) Delete(doc map[string]interface{}) {
@@ -70,21 +64,25 @@ func (idx *Index) Delete(doc map[string]interface{}) {
 	if !ok {
 		return
 	}
+	key := toString(val)
 	id := docIDString(doc)
-	list := idx.data[val]
+	list := idx.data[key]
 	for i, v := range list {
 		if v == id {
-			idx.data[val] = append(list[:i], list[i+1:]...)
-			if len(idx.data[val]) == 0 {
-				delete(idx.data, val)
+			idx.data[key] = append(list[:i], list[i+1:]...)
+			if len(idx.data[key]) == 0 {
+				delete(idx.data, key)
 			}
 			break
 		}
 	}
 }
 
+// Find returns the document IDs whose indexed field equals value. Lookup is
+// O(1) on the canonical string form of value, so it works identically for
+// freshly built and reloaded indexes.
 func (idx *Index) Find(value interface{}) []string {
-	return idx.data[value]
+	return idx.data[toString(value)]
 }
 
 func docIDString(doc map[string]interface{}) string {

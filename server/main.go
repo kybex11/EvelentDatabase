@@ -1,14 +1,17 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
 	"db/server/handlers"
@@ -67,6 +70,23 @@ func routeCollectionSubpaths(w http.ResponseWriter, r *http.Request, path string
 		}
 	}
 	return false
+}
+
+// kvRouter dispatches /api/kv/... requests to either the collection-level
+// handler (keys, stats, flush, batch ops) or the per-key handler.
+func kvRouter() http.HandlerFunc {
+	collectionOps := map[string]bool{
+		"keys": true, "stats": true, "flush": true,
+		"mget": true, "mset": true, "mdel": true,
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		rest := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/kv/"), "/")
+		if collectionOps[rest] {
+			handlers.KVCollectionHandler(w, r)
+			return
+		}
+		handlers.KVKeyHandler(w, r)
+	}
 }
 
 func apiHandler() http.HandlerFunc {
@@ -166,6 +186,8 @@ func main() {
 	mux.HandleFunc("/health", handlers.HealthHandler)
 	mux.HandleFunc("/api/collections", enableCORS(handlers.CollectionsHandler))
 	mux.HandleFunc("/api/collections/", enableCORS(apiHandler()))
+	mux.HandleFunc("/api/kv", enableCORS(handlers.KVCollectionHandler))
+	mux.HandleFunc("/api/kv/", enableCORS(kvRouter()))
 
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -184,5 +206,25 @@ func main() {
 	log.Printf("Starting server on %s", addr)
 	log.Printf("Data directory: %s", dataDir)
 	log.Printf("GOMAXPROCS = %d", runtime.GOMAXPROCS(0))
-	log.Fatal(srv.Serve(ln))
+
+	go func() {
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("server error: %v", err)
+		}
+	}()
+
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+	<-stop
+	log.Println("Shutting down, flushing in-memory store...")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Printf("graceful shutdown error: %v", err)
+	}
+	if err := database.Close(); err != nil {
+		log.Printf("database close error: %v", err)
+	}
+	log.Println("Goodbye.")
 }

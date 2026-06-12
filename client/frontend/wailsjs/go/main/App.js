@@ -46,6 +46,34 @@ export function InsertDocument(arg1, arg2) {
   return window['go']['main']['App']['InsertDocument'](arg1, arg2);
 }
 
+export function KVDelete(arg1) {
+  return window['go']['main']['App']['KVDelete'](arg1);
+}
+
+export function KVFlush() {
+  return window['go']['main']['App']['KVFlush']();
+}
+
+export function KVGet(arg1) {
+  return window['go']['main']['App']['KVGet'](arg1);
+}
+
+export function KVIncr(arg1, arg2) {
+  return window['go']['main']['App']['KVIncr'](arg1, arg2);
+}
+
+export function KVKeys(arg1) {
+  return window['go']['main']['App']['KVKeys'](arg1);
+}
+
+export function KVSet(arg1, arg2, arg3) {
+  return window['go']['main']['App']['KVSet'](arg1, arg2, arg3);
+}
+
+export function KVStats() {
+  return window['go']['main']['App']['KVStats']();
+}
+
 export function ListCollections() {
   return window['go']['main']['App']['ListCollections']();
 }

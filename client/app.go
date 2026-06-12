@@ -394,3 +394,137 @@ func (a *App) CollectionStats(collection string) (map[string]interface{}, error)
 	err := a.getJSON(a.base()+"/api/collections/"+url.PathEscape(collection)+"/stats", &stats)
 	return stats, err
 }
+
+// ---------------------------------------------------------------------------
+// In-memory KV store bindings
+// ---------------------------------------------------------------------------
+
+// KVKeys lists live keys in the in-memory store, optionally filtered by prefix.
+func (a *App) KVKeys(prefix string) ([]string, error) {
+	u := a.base() + "/api/kv/keys"
+	if strings.TrimSpace(prefix) != "" {
+		u += "?prefix=" + url.QueryEscape(prefix)
+	}
+	var out struct {
+		Keys []string `json:"keys"`
+	}
+	if err := a.getJSON(u, &out); err != nil {
+		return []string{}, err
+	}
+	if out.Keys == nil {
+		out.Keys = []string{}
+	}
+	return out.Keys, nil
+}
+
+// KVGet returns the value for key (empty string when absent).
+func (a *App) KVGet(key string) (string, error) {
+	req, err := http.NewRequestWithContext(a.ctxOrBg(), http.MethodGet, a.base()+"/api/kv/"+url.PathEscape(key), nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusNotFound {
+		return "", nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("%s", body)
+	}
+	var out struct {
+		Value string `json:"value"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return "", err
+	}
+	return out.Value, nil
+}
+
+// KVSet stores value under key. ttlSeconds <= 0 means no expiry.
+func (a *App) KVSet(key, value string, ttlSeconds float64) error {
+	payload := map[string]interface{}{"value": value, "ttlSeconds": ttlSeconds}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(http.MethodPut, a.base()+"/api/kv/"+url.PathEscape(key), bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("%s", body)
+	}
+	return nil
+}
+
+// KVDelete removes a key.
+func (a *App) KVDelete(key string) error {
+	req, err := http.NewRequest(http.MethodDelete, a.base()+"/api/kv/"+url.PathEscape(key), nil)
+	if err != nil {
+		return err
+	}
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotFound {
+		return fmt.Errorf("%s", body)
+	}
+	return nil
+}
+
+// KVIncr atomically adds delta to the integer at key and returns the new value.
+func (a *App) KVIncr(key string, delta int64) (int64, error) {
+	payload := map[string]interface{}{"delta": delta}
+	data, _ := json.Marshal(payload)
+	resp, err := a.client.Post(a.base()+"/api/kv/"+url.PathEscape(key)+"/incr", "application/json", bytes.NewReader(data))
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return 0, fmt.Errorf("%s", body)
+	}
+	var out struct {
+		Value int64 `json:"value"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return 0, err
+	}
+	return out.Value, nil
+}
+
+// KVStats returns the in-memory store counters.
+func (a *App) KVStats() (map[string]interface{}, error) {
+	var stats map[string]interface{}
+	err := a.getJSON(a.base()+"/api/kv/stats", &stats)
+	return stats, err
+}
+
+// KVFlush removes every key from the in-memory store.
+func (a *App) KVFlush() error {
+	resp, err := a.client.Post(a.base()+"/api/kv/flush", "application/json", nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("%s", body)
+	}
+	return nil
+}

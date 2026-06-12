@@ -6,16 +6,34 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 type Database struct {
 	rootDir     string
 	collections map[string]*Collection
 	encKey      []byte
+	kv          *MemStore
 	mu          sync.RWMutex
 }
 
+// MemStoreOptions tunes the embedded in-memory key/value store. The zero value
+// is valid and yields an unbounded store that snapshots every few seconds.
+type MemStoreOptions struct {
+	MaxItems   int
+	MaxBytes   int64
+	Shards     int
+	FlushEvery time.Duration
+	SweepEvery time.Duration
+}
+
 func NewDatabase(rootDir string) (*Database, error) {
+	return NewDatabaseWithOptions(rootDir, MemStoreOptions{})
+}
+
+// NewDatabaseWithOptions opens (or creates) a database at rootDir and brings up
+// the embedded in-memory store with the supplied bounds.
+func NewDatabaseWithOptions(rootDir string, kvOpts MemStoreOptions) (*Database, error) {
 	if err := os.MkdirAll(rootDir, 0755); err != nil {
 		return nil, err
 	}
@@ -28,6 +46,27 @@ func NewDatabase(rootDir string) (*Database, error) {
 		collections: make(map[string]*Collection),
 		encKey:      encKey,
 	}
+	flushEvery := kvOpts.FlushEvery
+	if flushEvery == 0 {
+		flushEvery = 5 * time.Second
+	}
+	sweepEvery := kvOpts.SweepEvery
+	if sweepEvery == 0 {
+		sweepEvery = time.Second
+	}
+	kv, err := NewMemStore(MemStoreConfig{
+		MaxItems:     kvOpts.MaxItems,
+		MaxBytes:     kvOpts.MaxBytes,
+		Shards:       kvOpts.Shards,
+		SnapshotPath: filepath.Join(rootDir, ".kvstore"),
+		EncKey:       encKey,
+		FlushEvery:   flushEvery,
+		SweepEvery:   sweepEvery,
+	})
+	if err != nil {
+		return nil, err
+	}
+	db.kv = kv
 	entries, err := os.ReadDir(rootDir)
 	if err != nil {
 		return nil, err
@@ -90,4 +129,17 @@ func (db *Database) ListCollections() ([]string, error) {
 		names = append(names, n)
 	}
 	return names, nil
+}
+
+// KV returns the embedded in-memory key/value store.
+func (db *Database) KV() *MemStore {
+	return db.kv
+}
+
+// Close flushes the in-memory store to disk and stops its background workers.
+func (db *Database) Close() error {
+	if db.kv != nil {
+		return db.kv.Close()
+	}
+	return nil
 }

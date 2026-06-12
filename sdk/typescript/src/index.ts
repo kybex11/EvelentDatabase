@@ -1,0 +1,11 @@
+export { EvelentClient } from "./client";
+export { CollectionScope } from "./collection-scope";
+export { HttpClient } from "./http";
+export { EvelentError } from "./errors";
+export * from "./types";
+export { CollectionsApi } from "./endpoints/collections";
+export { DocumentsApi } from "./endpoints/documents";
+export { IndexesApi } from "./endpoints/indexes";
+export { StatsApi } from "./endpoints/stats";
+export { HealthApi } from "./endpoints/health";
+export { KVApi } from "./endpoints/kv";

@@ -24,7 +24,15 @@
         </div>
         <div class="conn-pill active">HTTP · REST</div>
       </div>
-      <div class="sidebar-section grow">
+      <div class="mode-switch">
+        <button :class="{ on: mode === 'collections' }" type="button" @click="mode = 'collections'">
+          ▤ Коллекции
+        </button>
+        <button :class="{ on: mode === 'kv' }" type="button" @click="switchToKV">
+          ⚡ KV-хранилище
+        </button>
+      </div>
+      <div v-show="mode === 'collections'" class="sidebar-section grow">
         <div class="row-between">
           <span class="sidebar-label">Коллекции</span>
           <button class="icon-btn" type="button" title="Обновить" @click="refreshCollections">↻</button>
@@ -56,7 +64,7 @@
     </aside>
 
     <main class="main">
-      <header class="topbar">
+      <header class="topbar" v-if="mode === 'collections'">
         <div class="breadcrumb">
           <span class="crumb">Evelent</span>
           <span class="sep">/</span>
@@ -73,13 +81,27 @@
           </button>
         </div>
       </header>
+      <header class="topbar" v-else>
+        <div class="breadcrumb">
+          <span class="crumb">Evelent</span>
+          <span class="sep">/</span>
+          <span class="crumb dim">In-Memory KV</span>
+        </div>
+        <div v-if="kvStats" class="kv-stats-inline">
+          <span>{{ kvStats.items }} ключей</span>
+          <span class="muted">·</span>
+          <span>{{ formatBytes(Number(kvStats.bytes)) }}</span>
+          <span class="muted">·</span>
+          <span>hit {{ (Number(kvStats.hitRatio) * 100).toFixed(1) }}%</span>
+        </div>
+      </header>
 
-      <div v-if="!selectedCollection" class="empty-main">
+      <div v-if="mode === 'collections' && !selectedCollection" class="empty-main">
         <h2>Выберите коллекцию</h2>
         <p class="muted">Слева список коллекций — как в MongoDB Compass.</p>
       </div>
 
-      <div v-else class="content">
+      <div v-else-if="mode === 'collections'" class="content">
         <div v-if="activeTab === 'Документы'" class="panel">
           <div class="stats-row" v-if="stats">
             <span>{{ stats.count }} док.</span>
@@ -148,7 +170,70 @@
           </ul>
         </div>
       </div>
+
+      <div v-else class="content">
+        <div class="panel">
+          <div class="toolbar">
+            <input
+              v-model="kvKeyInput"
+              class="idx-input"
+              placeholder="ключ"
+              @keyup.enter="kvGetValue"
+            />
+            <button class="btn" type="button" @click="kvGetValue">Получить</button>
+            <button class="btn primary" type="button" @click="showKVSet = true">Записать</button>
+            <button class="btn" type="button" @click="refreshKV">Обновить</button>
+            <button class="btn danger-btn" type="button" @click="kvFlushAll">Очистить всё</button>
+          </div>
+
+          <div class="query-grid">
+            <label>
+              <span class="lbl">Фильтр по префиксу</span>
+              <input v-model="kvPrefix" type="text" placeholder="session:" @keyup.enter="refreshKV" />
+            </label>
+            <div class="query-opts">
+              <button class="btn-sm primary" type="button" @click="refreshKV">Применить префикс</button>
+            </div>
+          </div>
+
+          <div v-if="kvSelected" class="doc-card kv-value-card">
+            <div class="doc-head">
+              <code class="doc-id">{{ kvSelected.key }}</code>
+              <div class="doc-actions">
+                <button type="button" class="link" @click="kvEditSelected">Изменить</button>
+                <button type="button" class="link danger" @click="kvDeleteKey(kvSelected.key)">Удалить</button>
+              </div>
+            </div>
+            <pre class="doc-json">{{ kvSelected.value }}</pre>
+          </div>
+
+          <div class="kv-key-list">
+            <div v-for="k in kvKeys" :key="k" class="kv-key-row" @click="kvOpenKey(k)">
+              <span class="kv-key-icon">⚡</span>
+              <code class="kv-key-name">{{ k }}</code>
+              <button type="button" class="link danger" @click.stop="kvDeleteKey(k)">×</button>
+            </div>
+            <p v-if="kvKeys.length === 0" class="muted pad">Ключей нет.</p>
+          </div>
+        </div>
+      </div>
     </main>
+
+    <div v-if="showKVSet" class="modal-overlay" @click.self="showKVSet = false">
+      <div class="modal">
+        <h3>Записать ключ</h3>
+        <label class="lbl">Ключ</label>
+        <input v-model="kvSetKey" class="modal-input" type="text" placeholder="session:42" />
+        <label class="lbl">Значение</label>
+        <textarea v-model="kvSetValue" rows="6" placeholder="значение" />
+        <label class="lbl">TTL (секунды, 0 = без срока)</label>
+        <input v-model.number="kvSetTTL" class="modal-input" type="number" min="0" />
+        <div class="modal-actions">
+          <button type="button" class="btn" @click="showKVSet = false">Отмена</button>
+          <button type="button" class="btn primary" @click="kvSaveValue">Сохранить</button>
+        </div>
+      </div>
+    </div>
 
     <div v-if="showInsert" class="modal-overlay" @click.self="showInsert = false">
       <div class="modal">
@@ -191,6 +276,12 @@ import {
   GetServerURL,
   SetServerURL,
   PingServer,
+  KVKeys,
+  KVGet,
+  KVSet,
+  KVDelete,
+  KVStats,
+  KVFlush,
 } from "../wailsjs/go/main/App";
 
 const serverURLInput = ref("");
@@ -214,6 +305,18 @@ const showInsert = ref(false);
 const insertJSON = ref('{\n  "name": "example"\n}');
 const editDoc = ref<Record<string, unknown> | null>(null);
 const editJSON = ref("");
+
+// In-memory KV store state
+const mode = ref<"collections" | "kv">("collections");
+const kvKeys = ref<string[]>([]);
+const kvPrefix = ref("");
+const kvKeyInput = ref("");
+const kvSelected = ref<{ key: string; value: string } | null>(null);
+const kvStats = ref<Record<string, unknown> | null>(null);
+const showKVSet = ref(false);
+const kvSetKey = ref("");
+const kvSetValue = ref("");
+const kvSetTTL = ref(0);
 
 onMounted(async () => {
   try {
@@ -452,6 +555,96 @@ function exportDocs() {
   a.download = `${selectedCollection.value || "export"}.json`;
   a.click();
   URL.revokeObjectURL(a.href);
+}
+
+// ---- In-memory KV store ----
+
+async function switchToKV() {
+  mode.value = "kv";
+  await refreshKV();
+}
+
+async function loadKVStats() {
+  try {
+    kvStats.value = await KVStats();
+  } catch {
+    kvStats.value = null;
+  }
+}
+
+async function refreshKV() {
+  try {
+    kvKeys.value = (await KVKeys(kvPrefix.value.trim())) ?? [];
+    await loadKVStats();
+  } catch (e) {
+    alert(String(e));
+  }
+}
+
+async function kvGetValue() {
+  const key = kvKeyInput.value.trim();
+  if (!key) return;
+  try {
+    const value = await KVGet(key);
+    kvSelected.value = { key, value };
+  } catch (e) {
+    alert(String(e));
+  }
+}
+
+async function kvOpenKey(key: string) {
+  kvKeyInput.value = key;
+  try {
+    kvSelected.value = { key, value: await KVGet(key) };
+  } catch (e) {
+    alert(String(e));
+  }
+}
+
+function kvEditSelected() {
+  if (!kvSelected.value) return;
+  kvSetKey.value = kvSelected.value.key;
+  kvSetValue.value = kvSelected.value.value;
+  kvSetTTL.value = 0;
+  showKVSet.value = true;
+}
+
+async function kvSaveValue() {
+  const key = kvSetKey.value.trim();
+  if (!key) {
+    alert("Ключ обязателен");
+    return;
+  }
+  try {
+    await KVSet(key, kvSetValue.value, Number(kvSetTTL.value) || 0);
+    showKVSet.value = false;
+    kvSelected.value = { key, value: kvSetValue.value };
+    await refreshKV();
+  } catch (e) {
+    alert(String(e));
+  }
+}
+
+async function kvDeleteKey(key: string) {
+  if (!confirm(`Удалить ключ «${key}»?`)) return;
+  try {
+    await KVDelete(key);
+    if (kvSelected.value?.key === key) kvSelected.value = null;
+    await refreshKV();
+  } catch (e) {
+    alert(String(e));
+  }
+}
+
+async function kvFlushAll() {
+  if (!confirm("Удалить ВСЕ ключи из in-memory хранилища?")) return;
+  try {
+    await KVFlush();
+    kvSelected.value = null;
+    await refreshKV();
+  } catch (e) {
+    alert(String(e));
+  }
 }
 </script>
 
@@ -951,5 +1144,94 @@ function exportDocs() {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+
+/* ---- Mode switch + KV store ---- */
+.mode-switch {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 16px;
+  background: var(--bg-elevated);
+  padding: 4px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+}
+
+.mode-switch button {
+  flex: 1;
+  padding: 8px 10px;
+  font-size: 12px;
+  border: none;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.mode-switch button.on {
+  background: var(--accent);
+  color: #fff;
+}
+
+.kv-stats-inline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.danger-btn {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.danger-btn:hover {
+  background: rgba(248, 81, 73, 0.12);
+}
+
+.kv-value-card {
+  margin-bottom: 16px;
+}
+
+.kv-key-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.kv-key-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-panel);
+  cursor: pointer;
+}
+
+.kv-key-row:hover {
+  border-color: var(--accent);
+  background: var(--bg-elevated);
+}
+
+.kv-key-icon {
+  color: var(--accent);
+}
+
+.kv-key-name {
+  flex: 1;
+  font-size: 12px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.modal-input {
+  width: 100%;
+  padding: 8px 10px;
+  margin-bottom: 12px;
 }
 </style>

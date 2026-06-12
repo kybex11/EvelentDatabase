@@ -1,8 +1,20 @@
+# Dependencies
 */node_modules
+**/node_modules
+
 */build
 */dist
+**/dist
+*.exe
+*.test
+*.out
+
 */.env
-data/*
-data/.key
-data
+**/.env
+
+data/
+server/data/
+**/data/.key
+**/.kvstore
+
 */package-lock.json

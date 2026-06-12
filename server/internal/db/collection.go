@@ -195,6 +195,23 @@ func (c *Collection) Find(filter map[string]interface{}, opts *FindOptions) ([]m
 	}
 
 	var results []map[string]interface{}
+
+	// Fast path: a single equality on an indexed field loads only the matching
+	// documents by ID instead of scanning the whole collection.
+	if field, value, ok := EqualityIndexFilter(filter); ok {
+		if idx, has := c.indexes[field]; has {
+			for _, id := range idx.Find(value) {
+				doc, err := c.readDocByID(id)
+				if err != nil {
+					continue
+				}
+				results = append(results, doc)
+			}
+			return c.finalizeFind(results, opts), nil
+		}
+	}
+
+	// Slow path: full scan with in-memory filter matching.
 	entries, err := os.ReadDir(c.docsDir)
 	if err != nil {
 		return nil, err
@@ -217,12 +234,32 @@ func (c *Collection) Find(filter map[string]interface{}, opts *FindOptions) ([]m
 		}
 	}
 
+	return c.finalizeFind(results, opts), nil
+}
+
+// readDocByID loads and decodes a single document by id (no locking; callers
+// already hold the collection lock).
+func (c *Collection) readDocByID(id string) (map[string]interface{}, error) {
+	data, err := os.ReadFile(filepath.Join(c.docsDir, id+".json"))
+	if err != nil {
+		return nil, err
+	}
+	var doc map[string]interface{}
+	if err := decodeDocument(c.encKey, data, &doc); err != nil {
+		return nil, err
+	}
+	return doc, nil
+}
+
+// finalizeFind applies sort, skip and limit to a result set, shared by both the
+// indexed fast path and the full-scan slow path.
+func (c *Collection) finalizeFind(results []map[string]interface{}, opts *FindOptions) []map[string]interface{} {
 	if opts.SortField != "" {
 		field := opts.SortField
 		desc := opts.SortDesc
 		sort.SliceStable(results, func(i, j int) bool {
-			vi, _ := results[i][field]
-			vj, _ := results[j][field]
+			vi := results[i][field]
+			vj := results[j][field]
 			cmp := CompareValues(vi, vj)
 			if desc {
 				return cmp > 0
@@ -245,7 +282,7 @@ func (c *Collection) Find(filter map[string]interface{}, opts *FindOptions) ([]m
 	if results == nil {
 		results = []map[string]interface{}{}
 	}
-	return results, nil
+	return results
 }
 
 func (c *Collection) Stats() (docCount int64, totalBytes int64, err error) {

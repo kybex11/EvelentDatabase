@@ -4,6 +4,7 @@ type Client struct {
 	HTTP        *HTTPClient
 	Collections *CollectionsService
 	Health      *HealthService
+	KV          *KVService
 }
 
 func New(baseURL string) *Client {
@@ -12,6 +13,7 @@ func New(baseURL string) *Client {
 		HTTP:        h,
 		Collections: &CollectionsService{http: h},
 		Health:      &HealthService{http: h},
+		KV:          &KVService{http: h},
 	}
 }
 
