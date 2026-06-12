@@ -188,6 +188,10 @@ func main() {
 	mux.HandleFunc("/api/collections/", enableCORS(apiHandler()))
 	mux.HandleFunc("/api/kv", enableCORS(handlers.KVCollectionHandler))
 	mux.HandleFunc("/api/kv/", enableCORS(kvRouter()))
+	mux.HandleFunc("/api/hash/", enableCORS(handlers.HashHandler))
+	mux.HandleFunc("/api/list/", enableCORS(handlers.ListHandler))
+	mux.HandleFunc("/api/set/", enableCORS(handlers.SetHandler))
+	mux.HandleFunc("/api/pubsub/", enableCORS(handlers.PubSubHandler))
 
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {

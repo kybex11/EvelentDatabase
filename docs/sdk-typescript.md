@@ -90,6 +90,38 @@ console.log(stats.hitRatio);
 await kv.flush();
 ```
 
+## Data types (hash / list / set)
+
+```ts
+// hash
+await db.hash.set("user:1", "name", "Ada");
+await db.hash.incrBy("user:1", "logins", 1);
+const profile = await db.hash.getAll("user:1");
+
+// list
+await db.list.rpush("queue", "a", "b", "c");
+const items = await db.list.range("queue", 0, -1);
+const head = await db.list.lpop("queue");
+
+// set
+await db.set.add("tags", "go", "ts", "go");
+const isMember = await db.set.isMember("tags", "go");
+const members = await db.set.members("tags");
+```
+
+## Pub/Sub
+
+```ts
+const unsubscribe = db.pubsub.subscribe("room:1", (msg) => {
+  console.log("got", msg);
+});
+
+await db.pubsub.publish("room:1", "hello");
+
+// later
+unsubscribe();
+```
+
 ## Error handling
 
 Non-2xx responses throw `EvelentError`:

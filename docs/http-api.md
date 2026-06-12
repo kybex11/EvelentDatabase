@@ -103,6 +103,34 @@ descending, `1` ascending.
 }
 ```
 
+## Data types (hash / list / set)
+
+Full details in [data-types.md](data-types.md). Summary:
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `PUT` | `/api/hash/{key}/{field}` | set hash field |
+| `GET` | `/api/hash/{key}` | get whole hash |
+| `POST` | `/api/hash/{key}/{field}/incr` | atomic field increment |
+| `POST` | `/api/list/{key}/lpush` \| `/rpush` | push to a list |
+| `POST` | `/api/list/{key}/lpop` \| `/rpop` | pop from a list |
+| `GET` | `/api/list/{key}?start=&stop=` | list range |
+| `POST` | `/api/set/{key}/add` \| `/rem` | add/remove set members |
+| `GET` | `/api/set/{key}` | set members |
+
+A type mismatch (e.g. `GET /api/kv/{key}` on a hash key) returns `409 Conflict`
+with a `WRONGTYPE` message.
+
+## Pub/Sub
+
+Full details in [pubsub.md](pubsub.md). Summary:
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `POST` | `/api/pubsub/{channel}` | publish `{"message":"..."}` → `{"receivers":N}` |
+| `GET` | `/api/pubsub/{channel}/subscribe` | Server-Sent Events stream |
+| `GET` | `/api/pubsub/{channel}` | subscriber count |
+
 ## Errors
 
 Non-2xx responses carry a plain-text or JSON body describing the problem. Both

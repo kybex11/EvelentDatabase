@@ -107,5 +107,29 @@ instance across goroutines/requests rather than creating one per call.
   loads only the matching documents by ID via the index. Create an index on the
   field first. Range/`$in`/multi-field filters still scan.
 - Byte accounting is approximate and intended for ceilings, not exact metering.
+- Container types (hash/list/set) serialize their read-modify-write operations
+  through one op-mutex and copy-on-write, trading some throughput for atomicity
+  and freedom from data races.
+
+## Benchmarks
+
+Cache benchmarks live in `server/internal/db/bench_test.go`:
+
+```bash
+cd server
+go test ./internal/db -bench . -benchmem            # all benchmarks
+go test ./internal/db -bench Parallel -cpu 1,4,8     # scaling with cores
+```
+
+Representative results (8 cores, Intel i5-11600) showing the sharded cache vs a
+single global lock:
+
+| Benchmark | Single LRU | Sharded LRU | Speedup |
+|-----------|-----------:|------------:|:-------:|
+| Parallel GET | ~125 ns/op | ~46 ns/op | ~2.7× |
+| Parallel SET | ~173 ns/op | ~99 ns/op | ~1.7× |
+| Mixed 80/20 | ~141 ns/op | ~54 ns/op | ~2.6× |
+
+Numbers vary by machine; run them on your target hardware.
 
 Next: [Go SDK guide](sdk-go.md).

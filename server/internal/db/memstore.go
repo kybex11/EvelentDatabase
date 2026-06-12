@@ -21,6 +21,7 @@ type MemStore struct {
 	encKey       []byte
 
 	mu        sync.Mutex
+	opMu      sync.Mutex // serializes read-modify-write on typed values
 	stopCh    chan struct{}
 	stopped   bool
 	dirty     bool
@@ -73,24 +74,48 @@ func NewMemStore(cfg MemStoreConfig) (*MemStore, error) {
 	return ms, nil
 }
 
-func kvSize(key, value string) int64 {
-	return int64(len(key) + len(value) + 24)
+func kvSize(key string, v *Value) int64 {
+	return int64(len(key)) + v.size()
 }
 
-// Set stores value under key. ttl <= 0 stores it without expiry.
-func (m *MemStore) Set(key, value string, ttl time.Duration) {
-	m.cache.Set(key, value, ttl, kvSize(key, value))
+// setValue stores a typed value under key and marks the store dirty.
+func (m *MemStore) setValue(key string, v *Value, ttl time.Duration) {
+	m.cache.Set(key, v, ttl, kvSize(key, v))
 	m.markDirty()
 }
 
-// Get returns the value for key.
-func (m *MemStore) Get(key string) (string, bool) {
-	v, ok := m.cache.Get(key)
+// getValue returns the typed value stored at key.
+func (m *MemStore) getValue(key string) (*Value, bool) {
+	raw, ok := m.cache.Get(key)
 	if !ok {
+		return nil, false
+	}
+	v, ok := raw.(*Value)
+	return v, ok
+}
+
+// Set stores a string value under key. ttl <= 0 stores it without expiry.
+func (m *MemStore) Set(key, value string, ttl time.Duration) {
+	m.setValue(key, newStringValue(value), ttl)
+}
+
+// Get returns the string value for key. ok is false when the key is absent or
+// holds a non-string type.
+func (m *MemStore) Get(key string) (string, bool) {
+	v, ok := m.getValue(key)
+	if !ok || v.Kind != KindString {
 		return "", false
 	}
-	s, _ := v.(string)
-	return s, true
+	return v.Str, true
+}
+
+// Type reports the kind of value stored at key.
+func (m *MemStore) Type(key string) (ValueKind, bool) {
+	v, ok := m.getValue(key)
+	if !ok {
+		return 0, false
+	}
+	return v.Kind, true
 }
 
 // Delete removes key and reports whether it existed.
@@ -125,6 +150,8 @@ func (m *MemStore) Expire(key string, ttl time.Duration) bool {
 // Incr atomically increments the integer value stored at key by delta,
 // creating it at 0 when absent. Returns the new value.
 func (m *MemStore) Incr(key string, delta int64) (int64, error) {
+	m.opMu.Lock()
+	defer m.opMu.Unlock()
 	cur := int64(0)
 	if v, ok := m.Get(key); ok {
 		n, err := strconv.ParseInt(v, 10, 64)
@@ -165,11 +192,19 @@ func (m *MemStore) markDirty() {
 	m.mu.Unlock()
 }
 
+// persistItem is the on-disk representation of one entry, carrying the typed
+// value so hashes/lists/sets survive a restart with their kinds intact.
+type persistItem struct {
+	Key       string `json:"k"`
+	ExpiresAt int64  `json:"e,omitempty"`
+	Value     *Value `json:"v"`
+}
+
 // snapshotFile is the on-disk layout of the persisted store.
 type snapshotFile struct {
-	Version int       `json:"version"`
-	SavedAt int64     `json:"savedAt"`
-	Items   []LRUItem `json:"items"`
+	Version int           `json:"version"`
+	SavedAt int64         `json:"savedAt"`
+	Items   []persistItem `json:"items"`
 }
 
 // Save writes the current contents to the encrypted snapshot file. It is a
@@ -178,10 +213,19 @@ func (m *MemStore) Save() error {
 	if m.snapshotPath == "" {
 		return nil
 	}
+	raw := m.cache.Snapshot()
+	items := make([]persistItem, 0, len(raw))
+	for _, it := range raw {
+		v, ok := it.Value.(*Value)
+		if !ok {
+			continue
+		}
+		items = append(items, persistItem{Key: it.Key, ExpiresAt: it.ExpiresAt, Value: v})
+	}
 	snap := snapshotFile{
-		Version: 1,
+		Version: 2,
 		SavedAt: time.Now().Unix(),
-		Items:   m.cache.Snapshot(),
+		Items:   items,
 	}
 	data, err := json.Marshal(snap)
 	if err != nil {
@@ -218,8 +262,10 @@ func (m *MemStore) load() error {
 		return fmt.Errorf("corrupt memstore snapshot: %w", err)
 	}
 	for _, it := range snap.Items {
-		s, _ := it.Value.(string)
-		m.cache.RestoreItem(it, kvSize(it.Key, s))
+		if it.Value == nil {
+			continue
+		}
+		m.cache.RestoreItem(LRUItem{Key: it.Key, Value: it.Value, ExpiresAt: it.ExpiresAt}, kvSize(it.Key, it.Value))
 	}
 	return nil
 }

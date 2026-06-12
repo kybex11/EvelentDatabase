@@ -5,6 +5,7 @@ type Client struct {
 	Collections *CollectionsService
 	Health      *HealthService
 	KV          *KVService
+	PubSub      *PubSubService
 }
 
 func New(baseURL string) *Client {
@@ -14,6 +15,7 @@ func New(baseURL string) *Client {
 		Collections: &CollectionsService{http: h},
 		Health:      &HealthService{http: h},
 		KV:          &KVService{http: h},
+		PubSub:      &PubSubService{http: h},
 	}
 }
 

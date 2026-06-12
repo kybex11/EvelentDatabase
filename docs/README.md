@@ -20,16 +20,21 @@ first-class SDKs for **Go** and **TypeScript/JavaScript**.
 2. [Configuration](configuration.md) — every flag and environment variable
 3. [HTTP API reference](http-api.md) — all endpoints, requests and responses
 4. [In-memory KV store](kv-store.md) — the Redis-like store, TTL, eviction, persistence
-5. [Working with large volumes](large-data.md) — batching, streaming, indexes, tuning
-6. [Go SDK guide](sdk-go.md)
-7. [TypeScript/JavaScript SDK guide](sdk-typescript.md)
-8. [Architecture](architecture.md) — how it all fits together
+5. [Data types](data-types.md) — hash, list, and set commands
+6. [Pub/Sub](pubsub.md) — the publish/subscribe message bus (SSE)
+7. [Working with large volumes](large-data.md) — batching, streaming, indexes, tuning
+8. [Go SDK guide](sdk-go.md)
+9. [TypeScript/JavaScript SDK guide](sdk-typescript.md)
+10. [Architecture](architecture.md) — how it all fits together
 
 ## Feature highlights
 
 - **Document store** — collections of JSON documents, secondary indexes, rich filters.
 - **Redis-like KV store** — `SET/GET/DEL`, per-key TTL, atomic counters, batch
   `MSET/MGET/MDEL`, prefix scans, LRU eviction by item count or byte size.
+- **Data types** — hashes, lists, and sets with type-safe operations.
+- **Pub/Sub** — in-process publish/subscribe over Server-Sent Events.
+- **Sharded cache** — striped locks for high concurrent throughput.
 - **Encryption at rest** — AES-256-GCM for documents, indexes, and the KV snapshot.
 - **Persistence** — the in-memory store snapshots to an encrypted file and reloads on boot.
 - **Two SDKs** — Go and TypeScript, kept in sync with the HTTP API.

@@ -12,6 +12,8 @@ import (
 // SetNX stores value under key only when the key does not already exist. It
 // reports whether the write happened.
 func (m *MemStore) SetNX(key, value string, ttl time.Duration) bool {
+	m.opMu.Lock()
+	defer m.opMu.Unlock()
 	if m.Exists(key) {
 		return false
 	}
@@ -21,6 +23,8 @@ func (m *MemStore) SetNX(key, value string, ttl time.Duration) bool {
 
 // GetSet atomically sets key to value and returns the previous value (if any).
 func (m *MemStore) GetSet(key, value string, ttl time.Duration) (prev string, existed bool) {
+	m.opMu.Lock()
+	defer m.opMu.Unlock()
 	prev, existed = m.Get(key)
 	m.Set(key, value, ttl)
 	return prev, existed
@@ -29,6 +33,8 @@ func (m *MemStore) GetSet(key, value string, ttl time.Duration) (prev string, ex
 // Append concatenates value to the existing string at key (creating it when
 // absent) and returns the new length. The key's TTL is preserved.
 func (m *MemStore) Append(key, value string) int {
+	m.opMu.Lock()
+	defer m.opMu.Unlock()
 	cur, _ := m.Get(key)
 	next := cur + value
 	ttl := m.remainingTTL(key)
@@ -61,7 +67,8 @@ type KVItem struct {
 // (ttl <= 0 means no expiry). Returns the number of keys written.
 func (m *MemStore) MSet(items []KVItem, ttl time.Duration) int {
 	for _, it := range items {
-		m.cache.Set(it.Key, it.Value, ttl, kvSize(it.Key, it.Value))
+		v := newStringValue(it.Value)
+		m.cache.Set(it.Key, v, ttl, kvSize(it.Key, v))
 	}
 	if len(items) > 0 {
 		m.markDirty()
@@ -100,6 +107,8 @@ func (m *MemStore) DeleteMany(keys []string) int {
 
 // IncrByFloat atomically adds a floating-point delta to the value at key.
 func (m *MemStore) IncrByFloat(key string, delta float64) (float64, error) {
+	m.opMu.Lock()
+	defer m.opMu.Unlock()
 	cur := float64(0)
 	if v, ok := m.Get(key); ok {
 		n, err := strconv.ParseFloat(v, 64)

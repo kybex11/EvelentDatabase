@@ -14,6 +14,7 @@ type Database struct {
 	collections map[string]*Collection
 	encKey      []byte
 	kv          *MemStore
+	broker      *Broker
 	mu          sync.RWMutex
 }
 
@@ -67,6 +68,7 @@ func NewDatabaseWithOptions(rootDir string, kvOpts MemStoreOptions) (*Database, 
 		return nil, err
 	}
 	db.kv = kv
+	db.broker = NewBroker(64)
 	entries, err := os.ReadDir(rootDir)
 	if err != nil {
 		return nil, err
@@ -134,6 +136,11 @@ func (db *Database) ListCollections() ([]string, error) {
 // KV returns the embedded in-memory key/value store.
 func (db *Database) KV() *MemStore {
 	return db.kv
+}
+
+// PubSub returns the in-process publish/subscribe broker.
+func (db *Database) PubSub() *Broker {
+	return db.broker
 }
 
 // Close flushes the in-memory store to disk and stops its background workers.

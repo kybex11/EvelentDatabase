@@ -87,6 +87,44 @@ fmt.Printf("hit ratio: %.3f\n", stats.HitRatio)
 kv.Flush()
 ```
 
+## Data types (hash / list / set)
+
+```go
+kv := client.KV
+
+// hash
+kv.HSet("user:1", "name", "Ada")
+kv.HIncrBy("user:1", "logins", 1)
+all, _ := kv.HGetAll("user:1")
+
+// list
+kv.RPush("queue", "a", "b", "c")
+items, _ := kv.LRange("queue", 0, -1)
+head, ok, _ := kv.LPop("queue")
+
+// set
+kv.SAdd("tags", "go", "ts", "go")
+isMember, _ := kv.SIsMember("tags", "go")
+members, _ := kv.SMembers("tags")
+```
+
+## Pub/Sub
+
+```go
+ctx, cancel := context.WithCancel(context.Background())
+defer cancel()
+
+sub, _ := client.PubSub.Subscribe(ctx, "room:1")
+go func() {
+    for msg := range sub.Messages {
+        fmt.Println("got", msg)
+    }
+}()
+
+client.PubSub.Publish("room:1", "hello")
+// sub.Close() to stop
+```
+
 ## Error handling
 
 Non-2xx responses return `*sdk.APIError`:

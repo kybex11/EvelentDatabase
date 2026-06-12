@@ -9,3 +9,8 @@ export { IndexesApi } from "./endpoints/indexes";
 export { StatsApi } from "./endpoints/stats";
 export { HealthApi } from "./endpoints/health";
 export { KVApi } from "./endpoints/kv";
+export { HashApi } from "./endpoints/hash";
+export { ListApi } from "./endpoints/list";
+export { SetApi } from "./endpoints/set";
+export { PubSubApi } from "./endpoints/pubsub";
+export type { Unsubscribe } from "./endpoints/pubsub";
