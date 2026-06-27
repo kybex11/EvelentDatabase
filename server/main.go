@@ -18,19 +18,6 @@ import (
 	"db/server/internal/db"
 )
 
-func enableCORS(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-		next(w, r)
-	}
-}
-
 func routeCollectionSubpaths(w http.ResponseWriter, r *http.Request, path string) bool {
 	path = strings.TrimSuffix(path, "/")
 	if r.Method == http.MethodGet && strings.HasSuffix(path, "/stats") {
@@ -136,16 +123,26 @@ func main() {
 		readTimeout       time.Duration
 		writeTimeout      time.Duration
 		idleTimeout       time.Duration
+		apiKey            string
+		corsOrigins       string
+		maxBodySize       int64
+		rateLimit         float64
+		rateBurst         int
 	)
 
 	flag.StringVar(&addr, "addr", ":8080", "TCP address to listen on (e.g. :8080 or 0.0.0.0:9090); ignored if -port is set")
-	flag.StringVar(&portFlag, "port", "", "Listen port or address: 8080 → :8080; or :9090; or 127.0.0.1:3000 (overrides -addr)")
+	flag.StringVar(&portFlag, "port", "", "Listen port or address: 8080 → :8080; or :9090; or 127.0.0.1:3000. Overrides -addr.")
 	flag.StringVar(&dataDir, "data-dir", "", "Directory for storing database files (default: executable directory + /data)")
 	flag.IntVar(&gomaxprocs, "gomaxprocs", 0, "GOMAXPROCS value (0 = use all CPU cores)")
 	flag.DurationVar(&readHeaderTimeout, "http-read-header-timeout", 10*time.Second, "Maximum duration for reading request headers")
 	flag.DurationVar(&readTimeout, "http-read-timeout", 60*time.Second, "Maximum duration for reading the entire request")
 	flag.DurationVar(&writeTimeout, "http-write-timeout", 0, "Maximum duration before timing out writes (0 = no timeout)")
 	flag.DurationVar(&idleTimeout, "http-idle-timeout", 180*time.Second, "Maximum amount of time to wait for the next request when keep-alives are enabled")
+	flag.StringVar(&apiKey, "api-key", "", "API key for authentication (required for all /api/ endpoints). Also reads DB_API_KEY env var.")
+	flag.StringVar(&corsOrigins, "cors-origins", "*", "Comma-separated allowed CORS origins (* = allow all)")
+	flag.Int64Var(&maxBodySize, "max-body-size", 32<<20, "Maximum request body size in bytes (default 32 MiB)")
+	flag.Float64Var(&rateLimit, "rate-limit", 200, "Requests per second per IP (token-bucket rate)")
+	flag.IntVar(&rateBurst, "rate-burst", 500, "Maximum burst size per IP")
 
 	flag.Parse()
 
@@ -182,16 +179,38 @@ func main() {
 	}
 	handlers.Init(database)
 
+	// Resolve API key (flag takes precedence, then env var)
+	if apiKey == "" {
+		apiKey = os.Getenv("DB_API_KEY")
+	}
+	if apiKey == "" {
+		log.Println("WARNING: No API key configured (-api-key or DB_API_KEY). The server is OPEN to the network!")
+		log.Println("         Set an API key immediately for any non-localhost deployment.")
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", handlers.HealthHandler)
-	mux.HandleFunc("/api/collections", enableCORS(handlers.CollectionsHandler))
-	mux.HandleFunc("/api/collections/", enableCORS(apiHandler()))
-	mux.HandleFunc("/api/kv", enableCORS(handlers.KVCollectionHandler))
-	mux.HandleFunc("/api/kv/", enableCORS(kvRouter()))
-	mux.HandleFunc("/api/hash/", enableCORS(handlers.HashHandler))
-	mux.HandleFunc("/api/list/", enableCORS(handlers.ListHandler))
-	mux.HandleFunc("/api/set/", enableCORS(handlers.SetHandler))
-	mux.HandleFunc("/api/pubsub/", enableCORS(handlers.PubSubHandler))
+	mux.HandleFunc("/api/collections", handlers.CollectionsHandler)
+	mux.HandleFunc("/api/collections/", apiHandler())
+	mux.HandleFunc("/api/kv", handlers.KVCollectionHandler)
+	mux.HandleFunc("/api/kv/", kvRouter())
+	mux.HandleFunc("/api/hash/", handlers.HashHandler)
+	mux.HandleFunc("/api/list/", handlers.ListHandler)
+	mux.HandleFunc("/api/set/", handlers.SetHandler)
+	mux.HandleFunc("/api/pubsub/", handlers.PubSubHandler)
+
+	// Build middleware chain (applied bottom-up):
+	// request → securityHeaders → CORS → rateLimit → maxBody → auth → mux
+	var handler http.Handler = mux
+	if apiKey != "" {
+		handler = authMiddleware(apiKey, handler)
+	}
+	handler = maxBodyMiddleware(maxBodySize, handler)
+	rl := newRateLimiter(rateLimit, rateBurst)
+	go rl.cleanup()
+	handler = rateLimitMiddleware(rl, handler)
+	handler = corsMiddleware(corsOrigins, handler)
+	handler = securityHeaders(handler)
 
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -199,7 +218,7 @@ func main() {
 	}
 
 	srv := &http.Server{
-		Handler:           mux,
+		Handler:           handler,
 		ReadHeaderTimeout: readHeaderTimeout,
 		ReadTimeout:       readTimeout,
 		WriteTimeout:      writeTimeout,

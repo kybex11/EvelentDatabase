@@ -14,6 +14,11 @@ The server is configured through command-line flags and environment variables.
 | `-http-read-timeout` | `60s` | Max duration for reading the entire request. |
 | `-http-write-timeout` | `0` | Max duration before timing out writes. `0` = no timeout. |
 | `-http-idle-timeout` | `180s` | Keep-alive idle timeout. |
+| `-api-key` | _(empty)_ | API key for authenticating `/api/*` requests. Also reads `DB_API_KEY` env var. **Required for any non-localhost deployment.** |
+| `-cors-origins` | `*` | Comma-separated allowed CORS origins. Set to your domain(s) in production. |
+| `-max-body-size` | `33554432` (32 MiB) | Maximum request body in bytes. Oversized → `413`. |
+| `-rate-limit` | `200` | Token-bucket rate: requests per second per IP. |
+| `-rate-burst` | `500` | Token-bucket burst (max tokens accumulated per IP). |
 
 A bare positional argument is also accepted as the port: `./db.exe 9090`.
 
@@ -30,6 +35,7 @@ A bare positional argument is also accepted as the port: `./db.exe 9090`.
 | Variable | Description |
 |----------|-------------|
 | `DB_ENCRYPTION_KEY` | 32-byte AES key as **64 hex characters**. When set, it overrides the on-disk `.key` file. Use this to share one key across replicas or to keep the key out of the data directory. |
+| `DB_API_KEY` | API key for authenticating requests (same as `-api-key` flag, flag takes precedence). |
 
 Generate a key:
 

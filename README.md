@@ -124,12 +124,38 @@ Numbers vary by machine — run them on your target hardware.
 
 ## Security notes
 
-- The HTTP API has **no built-in authentication** — run it on a trusted network
-  or behind an authenticating reverse proxy. Do not expose it directly to the
-  public internet.
+- **API Key authentication** — set `-api-key` flag or `DB_API_KEY` env variable.
+  All `/api/*` endpoints require the key (via `X-API-Key` header or `?key=`
+  query param). Health checks are exempt. **Without a key the server is open.**
+- **Rate limiting** — per-IP token-bucket limiter (`-rate-limit` req/s,
+  `-rate-burst` burst size). Returns `429 Too Many Requests`.
+- **Request size limit** — `-max-body-size` (default 32 MiB). Oversized bodies
+  get `413 Request Entity Too Large`.
+- **CORS** — configurable via `-cors-origins` (comma-separated, `*` for all).
+- **Path traversal protection** — collection names are validated (no `..`, `/`,
+  `\`, dot-prefixed, max 128 chars).
+- **Security headers** — `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`.
 - Encryption at rest uses a key from `DB_ENCRYPTION_KEY` (64 hex chars) or an
   auto-generated `.key` in the data directory. Back up the key — without it the
   data is unrecoverable.
+
+### Running on a public IP
+
+```bash
+./db.exe -port 2026 -api-key "$(openssl rand -hex 32)" -cors-origins "https://yourdomain.com"
+```
+
+Then pass the key in SDK calls:
+```go
+// Go — custom header via Transport
+req.Header.Set("X-API-Key", "your-key")
+```
+```ts
+// TS — extend the HttpClient or use ?key=...
+```
+
+For production, also put the server behind a TLS-terminating reverse proxy
+(nginx, Caddy, etc.) so the key and data are encrypted in transit.
 
 ---
 

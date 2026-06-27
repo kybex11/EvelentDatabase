@@ -14,6 +14,27 @@ func Init(d *db.Database) {
 	database = d
 }
 
+// validCollectionName rejects empty, dot-prefixed, and path-traversal names.
+func validCollectionName(name string) bool {
+	if name == "" {
+		return false
+	}
+	if strings.HasPrefix(name, ".") {
+		return false
+	}
+	if strings.ContainsAny(name, "/\\") {
+		return false
+	}
+	if strings.Contains(name, "..") {
+		return false
+	}
+	// max length guard
+	if len(name) > 128 {
+		return false
+	}
+	return true
+}
+
 func writeJSON(w http.ResponseWriter, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(v)
@@ -36,6 +57,10 @@ func CollectionsHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		if !validCollectionName(req.Name) {
+			http.Error(w, "invalid collection name", http.StatusBadRequest)
+			return
+		}
 		_, err := database.GetCollection(req.Name)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -49,8 +74,8 @@ func CollectionsHandler(w http.ResponseWriter, r *http.Request) {
 
 func CollectionHandler(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimPrefix(r.URL.Path, "/api/collections/")
-	if name == "" {
-		http.Error(w, "collection name required", http.StatusBadRequest)
+	if name == "" || !validCollectionName(name) {
+		http.Error(w, "invalid collection name", http.StatusBadRequest)
 		return
 	}
 	if r.Method == http.MethodDelete {
