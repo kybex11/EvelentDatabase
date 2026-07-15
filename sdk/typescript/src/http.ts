@@ -1,11 +1,31 @@
 import { EvelentError } from "./errors";
 import axios, { AxiosResponse, AxiosError } from "axios";
 
+export type HttpClientOptions = {
+  apiKey?: string;
+};
+
 export class HttpClient {
-  constructor(private readonly baseUrl: string) {}
+  private readonly apiKey?: string;
+
+  constructor(
+    private readonly baseUrl: string,
+    options?: HttpClientOptions,
+  ) {
+    this.apiKey = options?.apiKey;
+  }
 
   normalizeBase(): string {
     return this.baseUrl.replace(/\/+$/, "");
+  }
+
+  /** Headers merged into every request (auth + Accept for SSE callers). */
+  authHeaders(extra?: Record<string, string>): Record<string, string> {
+    const h: Record<string, string> = { ...(extra || {}) };
+    if (this.apiKey) {
+      h["X-API-Key"] = this.apiKey;
+    }
+    return h;
   }
 
   async request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -17,7 +37,7 @@ export class HttpClient {
         method: init?.method || "GET",
         headers: {
           "Content-Type": "application/json",
-          ...(init?.headers as Record<string, string>),
+          ...this.authHeaders(init?.headers as Record<string, string>),
         },
         data: init?.body,
         validateStatus: () => true,
@@ -86,6 +106,7 @@ export class HttpClient {
       const response: AxiosResponse = await axios({
         url,
         method: "GET",
+        headers: this.authHeaders(),
         responseType: "text",
         validateStatus: () => true,
       });

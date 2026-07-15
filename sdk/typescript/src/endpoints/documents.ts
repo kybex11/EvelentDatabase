@@ -1,4 +1,4 @@
-import type { Document, FindQuery, InsertManyResult, InsertOneResult, JsonObject } from "../types";
+import type { Document, FindQuery, FindResult, InsertManyResult, InsertOneResult, JsonObject } from "../types";
 import { HttpClient, enc } from "../http";
 
 export class DocumentsApi {
@@ -46,10 +46,22 @@ export class DocumentsApi {
   }
 
   async find(query?: FindQuery | Record<string, unknown>): Promise<Document[]> {
+    const page = await this.findPage(query);
+    return page.documents;
+  }
+
+  async findPage(query?: FindQuery | Record<string, unknown>): Promise<FindResult> {
     const body = query ?? {};
-    return this.http.request<Document[]>(`${this.base()}/find`, {
+    const raw = await this.http.request<FindResult | Document[]>(`${this.base()}/find`, {
       method: "POST",
       body: JSON.stringify(body),
     });
+    if (Array.isArray(raw)) {
+      return { documents: raw };
+    }
+    return {
+      documents: raw.documents ?? [],
+      nextCursor: raw.nextCursor || undefined,
+    };
   }
 }

@@ -6,53 +6,63 @@ The server is configured through command-line flags and environment variables.
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-addr` | `:8080` | TCP address to listen on (e.g. `:8080`, `0.0.0.0:9090`). Ignored if `-port` is set. |
-| `-port` | _(empty)_ | Listen port or address: `8080` → `:8080`; `:9090`; `127.0.0.1:3000`. Overrides `-addr`. |
+| `-addr` | `127.0.0.1:8080` | TCP address to listen on. **Defaults to localhost.** Use `0.0.0.0:port` only behind a reverse proxy with an API key. |
+| `-port` | _(empty)_ | Listen port or address: `8080` → `127.0.0.1:8080`; `0.0.0.0:9090`. Overrides `-addr`. |
 | `-data-dir` | _(exe dir)_`/data` | Directory for database files (collections, indexes, encryption key, KV snapshot). |
 | `-gomaxprocs` | `0` | `GOMAXPROCS` value. `0` uses all CPU cores. |
 | `-http-read-header-timeout` | `10s` | Max duration for reading request headers. |
 | `-http-read-timeout` | `60s` | Max duration for reading the entire request. |
 | `-http-write-timeout` | `0` | Max duration before timing out writes. `0` = no timeout. |
 | `-http-idle-timeout` | `180s` | Keep-alive idle timeout. |
-| `-api-key` | _(empty)_ | API key for authenticating `/api/*` requests. Also reads `DB_API_KEY` env var. **Required for any non-localhost deployment.** |
-| `-cors-origins` | `*` | Comma-separated allowed CORS origins. Set to your domain(s) in production. |
+| `-api-key` | _(empty)_ | API key for authenticating `/api/*` requests. Also reads `DB_API_KEY`. **Required when binding a non-loopback address** (unless `-allow-insecure-open`). |
+| `-allow-insecure-open` | `false` | Allow a non-loopback bind with no API key. Dangerous — only for controlled tests. |
+| `-cors-origins` | _(empty)_ | Comma-separated allowed CORS origins. Empty = no browser CORS. Use an explicit origin in production; `*` allows all. |
 | `-max-body-size` | `33554432` (32 MiB) | Maximum request body in bytes. Oversized → `413`. |
 | `-rate-limit` | `200` | Token-bucket rate: requests per second per IP. |
 | `-rate-burst` | `500` | Token-bucket burst (max tokens accumulated per IP). |
 
-A bare positional argument is also accepted as the port: `./db.exe 9090`.
+A bare positional argument is also accepted as the port: `./db.exe 9090` → `127.0.0.1:9090`.
 
 ### Examples
 
 ```bash
-./db.exe -port 9090 -data-dir /var/lib/evelent
-./db.exe -addr 0.0.0.0:8080 -gomaxprocs 4
-./db.exe 3000                       # listen on :3000
+# Local only (safe default)
+./db.exe -port 2026 -data-dir ./data
+
+# Public / proxied — MUST set an API key
+./db.exe -addr 0.0.0.0:7027 -api-key "$(openssl rand -hex 32)" -cors-origins "https://yourdomain.com"
+
+# Behind nginx on the same host (recommended for domain.com/db)
+./db.exe -addr 127.0.0.1:7027 -api-key "$DB_API_KEY" -cors-origins "https://domain.com"
 ```
+
+## Fail-closed bind rules
+
+| Bind | API key | Result |
+|------|---------|--------|
+| `127.0.0.1` / `::1` | missing | Starts (loopback-only notice) |
+| `0.0.0.0` / `:port` / public IP | missing | **Refuses to start** |
+| any non-loopback | missing + `-allow-insecure-open` | Starts with WARNING |
+| any | set | Auth middleware on `/api/*` |
+
+Prefer `X-API-Key` header. `?key=` still works but is **deprecated** (leaks into access logs).
 
 ## Environment variables
 
 | Variable | Description |
 |----------|-------------|
-| `DB_ENCRYPTION_KEY` | 32-byte AES key as **64 hex characters**. When set, it overrides the on-disk `.key` file. Use this to share one key across replicas or to keep the key out of the data directory. |
+| `DB_ENCRYPTION_KEY` | 32-byte AES key as **64 hex characters**. When set, it overrides the on-disk `.key` file. |
 | `DB_API_KEY` | API key for authenticating requests (same as `-api-key` flag, flag takes precedence). |
 
 Generate a key:
 
 ```bash
-# Go
-go run -exec "" - <<'EOF'
-package main
-import ("crypto/rand";"encoding/hex";"fmt")
-func main(){b:=make([]byte,32);rand.Read(b);fmt.Println(hex.EncodeToString(b))}
-EOF
-
-# OpenSSL
 openssl rand -hex 32
 ```
 
 ```bash
 export DB_ENCRYPTION_KEY=$(openssl rand -hex 32)
+export DB_API_KEY=$(openssl rand -hex 32)
 ./db.exe -port 8080
 ```
 
@@ -82,4 +92,4 @@ database, err := db.NewDatabaseWithOptions("./data", db.MemStoreOptions{
 The default binary uses these defaults; the snapshot lives at
 `<data-dir>/.kvstore` and is AES-256-GCM encrypted with the same key as documents.
 
-Next: [HTTP API reference](http-api.md).
+Next: [HTTP API reference](http-api.md) · [Large volumes](large-data.md).

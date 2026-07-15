@@ -113,6 +113,23 @@ func apiHandler() http.HandlerFunc {
 	}
 }
 
+// isLoopbackListenAddr reports whether addr only accepts local connections.
+// Bare ":port" / "0.0.0.0:port" / "[::]:port" are treated as non-loopback.
+func isLoopbackListenAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	if host == "" {
+		return false
+	}
+	ip := net.ParseIP(host)
+	if ip != nil {
+		return ip.IsLoopback()
+	}
+	return host == "localhost"
+}
+
 func main() {
 	var (
 		addr              string
@@ -128,10 +145,11 @@ func main() {
 		maxBodySize       int64
 		rateLimit         float64
 		rateBurst         int
+		allowInsecureOpen bool
 	)
 
-	flag.StringVar(&addr, "addr", ":8080", "TCP address to listen on (e.g. :8080 or 0.0.0.0:9090); ignored if -port is set")
-	flag.StringVar(&portFlag, "port", "", "Listen port or address: 8080 → :8080; or :9090; or 127.0.0.1:3000. Overrides -addr.")
+	flag.StringVar(&addr, "addr", "127.0.0.1:8080", "TCP address to listen on (default localhost-only; use 0.0.0.0:port for all interfaces)")
+	flag.StringVar(&portFlag, "port", "", "Listen port or address: 8080 → 127.0.0.1:8080; or :9090; or 0.0.0.0:3000. Overrides -addr.")
 	flag.StringVar(&dataDir, "data-dir", "", "Directory for storing database files (default: executable directory + /data)")
 	flag.IntVar(&gomaxprocs, "gomaxprocs", 0, "GOMAXPROCS value (0 = use all CPU cores)")
 	flag.DurationVar(&readHeaderTimeout, "http-read-header-timeout", 10*time.Second, "Maximum duration for reading request headers")
@@ -139,10 +157,11 @@ func main() {
 	flag.DurationVar(&writeTimeout, "http-write-timeout", 0, "Maximum duration before timing out writes (0 = no timeout)")
 	flag.DurationVar(&idleTimeout, "http-idle-timeout", 180*time.Second, "Maximum amount of time to wait for the next request when keep-alives are enabled")
 	flag.StringVar(&apiKey, "api-key", "", "API key for authentication (required for all /api/ endpoints). Also reads DB_API_KEY env var.")
-	flag.StringVar(&corsOrigins, "cors-origins", "*", "Comma-separated allowed CORS origins (* = allow all)")
+	flag.StringVar(&corsOrigins, "cors-origins", "", "Comma-separated allowed CORS origins (empty = none; * = allow all). Prefer an explicit origin in production.")
 	flag.Int64Var(&maxBodySize, "max-body-size", 32<<20, "Maximum request body size in bytes (default 32 MiB)")
 	flag.Float64Var(&rateLimit, "rate-limit", 200, "Requests per second per IP (token-bucket rate)")
 	flag.IntVar(&rateBurst, "rate-burst", 500, "Maximum burst size per IP")
+	flag.BoolVar(&allowInsecureOpen, "allow-insecure-open", false, "Allow binding a non-loopback address without an API key (dangerous)")
 
 	flag.Parse()
 
@@ -151,12 +170,12 @@ func main() {
 		if strings.Contains(pf, ":") {
 			addr = pf
 		} else {
-			addr = ":" + pf
+			addr = "127.0.0.1:" + pf
 		}
 	} else if flag.NArg() > 0 {
 		portArg := flag.Arg(0)
 		if !strings.Contains(portArg, ":") {
-			portArg = ":" + portArg
+			portArg = "127.0.0.1:" + portArg
 		}
 		addr = portArg
 	}
@@ -183,9 +202,16 @@ func main() {
 	if apiKey == "" {
 		apiKey = os.Getenv("DB_API_KEY")
 	}
+	loopback := isLoopbackListenAddr(addr)
 	if apiKey == "" {
-		log.Println("WARNING: No API key configured (-api-key or DB_API_KEY). The server is OPEN to the network!")
-		log.Println("         Set an API key immediately for any non-localhost deployment.")
+		if !loopback && !allowInsecureOpen {
+			log.Fatalf("Refusing to start: bind address %s is not loopback and no API key is set. Pass -api-key / DB_API_KEY, bind 127.0.0.1, or use -allow-insecure-open (dangerous).", addr)
+		}
+		if !loopback {
+			log.Println("WARNING: -allow-insecure-open: server is OPEN on a non-loopback address with no API key!")
+		} else {
+			log.Println("NOTICE: No API key configured. Safe only because bind is loopback. Set -api-key for any shared/proxied use.")
+		}
 	}
 
 	mux := http.NewServeMux()
@@ -226,7 +252,7 @@ func main() {
 		MaxHeaderBytes:    1 << 20,
 	}
 
-	log.Printf("Starting server on %s", addr)
+	log.Printf("Starting server on %s (loopback=%v, apiKey=%v)", addr, loopback, apiKey != "")
 	log.Printf("Data directory: %s", dataDir)
 	log.Printf("GOMAXPROCS = %d", runtime.GOMAXPROCS(0))
 

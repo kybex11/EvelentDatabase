@@ -9,7 +9,7 @@ import sdk "evelent.dev/db/sdk"
 ## Connect
 
 ```go
-client := sdk.New("http://127.0.0.1:8080")
+client := sdk.New("http://127.0.0.1:8080", sdk.WithAPIKey("secret"))
 ```
 
 `client` exposes:

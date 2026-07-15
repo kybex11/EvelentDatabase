@@ -16,8 +16,8 @@ npm run build      # emits dist/
 ```ts
 import { EvelentClient } from "@evelent/db-sdk";
 
-const db = new EvelentClient("http://127.0.0.1:8080");
-// or: const db = EvelentClient.connect("http://127.0.0.1:8080");
+const db = new EvelentClient("http://127.0.0.1:8080", { apiKey: "secret" });
+// or: const db = EvelentClient.connect("http://127.0.0.1:8080", { apiKey: "secret" });
 ```
 
 `db` exposes:

@@ -38,6 +38,10 @@ export function GetDocument(arg1, arg2) {
   return window['go']['main']['App']['GetDocument'](arg1, arg2);
 }
 
+export function GetAPIKey() {
+  return window['go']['main']['App']['GetAPIKey']();
+}
+
 export function GetServerURL() {
   return window['go']['main']['App']['GetServerURL']();
 }
@@ -84,6 +88,10 @@ export function ListIndexes(arg1) {
 
 export function PingServer() {
   return window['go']['main']['App']['PingServer']();
+}
+
+export function SetAPIKey(arg1) {
+  return window['go']['main']['App']['SetAPIKey'](arg1);
 }
 
 export function SetServerURL(arg1) {

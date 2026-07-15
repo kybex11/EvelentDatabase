@@ -2,7 +2,7 @@
   <div class="compass">
     <aside class="sidebar">
       <div class="brand">
-        <div class="logo">EV</div>
+        <img class="logo" src="./assets/appicon.png" alt="Evelent DB" width="40" height="40" />
         <div>
           <div class="brand-title">Evelent DB</div>
           <div class="brand-sub">{{ displayURL }}</div>
@@ -17,6 +17,14 @@
           spellcheck="false"
           placeholder="http://127.0.0.1:8080"
           title="Полный URL или host:port"
+        />
+        <input
+          v-model="apiKeyInput"
+          class="conn-url"
+          type="password"
+          spellcheck="false"
+          placeholder="API key (X-API-Key)"
+          title="API key for authenticated servers"
         />
         <div class="conn-actions">
           <button class="btn-sm primary" type="button" @click="applyServerURL">Применить</button>
@@ -275,6 +283,8 @@ import {
   UpdateDocument,
   GetServerURL,
   SetServerURL,
+  GetAPIKey,
+  SetAPIKey,
   PingServer,
   KVKeys,
   KVGet,
@@ -285,6 +295,7 @@ import {
 } from "../wailsjs/go/main/App";
 
 const serverURLInput = ref("");
+const apiKeyInput = ref("");
 const displayURL = ref<string>("");
 const collections = ref<string[]>([]);
 const selectedCollection = ref("");
@@ -323,6 +334,7 @@ onMounted(async () => {
     const u = await GetServerURL();
     serverURLInput.value = u;
     displayURL.value = u;
+    apiKeyInput.value = await GetAPIKey();
   } catch {
     serverURLInput.value = "http://127.0.0.1:8080";
     displayURL.value = serverURLInput.value;
@@ -333,6 +345,7 @@ onMounted(async () => {
 async function applyServerURL() {
   try {
     await SetServerURL(serverURLInput.value.trim());
+    await SetAPIKey(apiKeyInput.value);
     displayURL.value = await GetServerURL();
     selectedCollection.value = "";
     await refreshCollections();
@@ -344,6 +357,7 @@ async function applyServerURL() {
 async function testConnection() {
   try {
     await SetServerURL(serverURLInput.value.trim());
+    await SetAPIKey(apiKeyInput.value);
     await PingServer();
     displayURL.value = await GetServerURL();
     alert("Сервер доступен");
@@ -677,13 +691,9 @@ async function kvFlushAll() {
   width: 40px;
   height: 40px;
   border-radius: 8px;
-  background: linear-gradient(135deg, #3fa34d, #238636);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-weight: 700;
-  font-size: 14px;
-  color: #fff;
+  object-fit: cover;
+  flex-shrink: 0;
+  display: block;
 }
 
 .brand-title {

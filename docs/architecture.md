@@ -13,28 +13,28 @@
                                   │            │
                      ┌────────────▼──┐    ┌────▼──────────────┐
                      │ Collections   │    │ MemStore (KV)     │
-                     │  - documents  │    │  - LRU + TTL      │
-                     │  - indexes    │    │  - batch ops      │
-                     │  - find/query │    │  - snapshot       │
+                     │  - segments   │    │  - LRU + TTL      │
+                     │  - docindex   │    │  - batch ops      │
+                     │  - indexes    │    │  - snapshot       │
                      └───────┬───────┘    └────────┬──────────┘
                              │                     │
                    AES-256-GCM at rest    AES-256-GCM snapshot
-                   (docs + indexes)        (<data-dir>/.kvstore)
+                   (segs + indexes)        (<data-dir>/.kvstore)
 ```
 
 ## Server (`server/`)
 
-- `main.go` — flag parsing, routing, graceful shutdown.
-- `handlers/` — HTTP handlers (`api.go`, `kv.go`, `health.go`).
+- `main.go` — flag parsing, fail-closed bind/API-key rules, routing, shutdown.
+- `middleware.go` — API key auth, CORS, rate limit, body size, security headers.
+- `handlers/` — HTTP handlers (`api.go`, `kv.go`, `health.go`, …).
 - `internal/db/` — the engine:
   - `db.go` — `Database`, collection registry, KV lifecycle.
-  - `collection.go` — document CRUD, find, stats.
+  - `collection.go` — document CRUD, find, stats over segments + legacy files.
+  - `segment.go` / `docindex.go` — append-only segments and id→offset map.
+  - `shard.go` — hex path helpers for legacy documents.
   - `index.go`, `query.go`, `filter_eq.go`, `findopts.go`, `projection.go` — querying.
   - `atrest.go` — AES-256-GCM encryption + atomic file writes.
-  - `lru.go` — the cache primitive.
-  - `shardedlru.go` — striped multi-shard cache for concurrency.
-  - `memstore.go`, `memstore_ops.go` — the KV store.
-  - `shard.go` — document path sharding helpers.
+  - `lru.go` / `shardedlru.go` / `memstore*.go` — KV store.
 
 ## Data layout (on disk)
 
@@ -43,30 +43,36 @@
 ├── .key                     # 32-byte AES key (unless DB_ENCRYPTION_KEY is set)
 ├── .kvstore                 # encrypted KV snapshot
 └── <collection>/
-    ├── docs/<id>.json       # encrypted documents
-    └── indexes/<field>.idx  # encrypted index
+    ├── .docindex            # encrypted id → {seg, offset, length}
+    ├── segments/NNNNNN.seg  # append-only encrypted document payloads
+    ├── docs/                # legacy per-doc files (flat or hex-sharded)
+    │   └── ab/<id>.json
+    └── indexes/<field>.idx  # encrypted secondary index
 ```
+
+New writes go to segments. Reads check `.docindex` first, then legacy paths.
 
 ## Request lifecycle
 
-1. The HTTP server receives a request; CORS and method routing happen in `main.go`.
-2. The handler resolves the collection (lazily created/loaded) or the KV store.
-3. Reads/writes go through AES-GCM encode/decode and atomic file writes.
-4. KV writes mark the store dirty; a background loop snapshots it, and a final
-   snapshot is written on shutdown.
+1. Middleware: security headers → CORS → rate limit → max body → API key → mux.
+2. Handler resolves the collection or KV store.
+3. Document writes append encrypted payloads to the current segment and update `.docindex`.
+4. KV writes mark the store dirty; a background loop snapshots; collections flush
+   indexes/docindex on `Close`.
 
 ## Concurrency model
 
 - `Database` guards its collection map with an `RWMutex`.
-- Each `Collection` guards its files/indexes with an `RWMutex`.
-- The KV store uses a **sharded cache** (`ShardedLRU`): keys are striped across
-  N independent `LRU` shards, each with its own mutex, so concurrent operations
-  on different shards never contend. A single-shard mode (`Shards: 1`) keeps
-  exact global eviction ordering when that matters more than throughput.
+- Each `Collection` guards segments/indexes with an `RWMutex`.
+- The KV store uses a **sharded cache** (`ShardedLRU`).
+
+## Security (defaults)
+
+- Listen on `127.0.0.1` by default.
+- Non-loopback bind without an API key → process exits (unless `-allow-insecure-open`).
+- Prefer `X-API-Key`; `?key=` is deprecated.
 
 ## SDKs
 
-Both SDKs are thin, typed wrappers over the same HTTP API and are kept in sync:
-
-- **Go** (`sdk/go`) — `net/http` with a pooled transport.
-- **TypeScript** (`sdk/typescript`) — `axios`, modular endpoint classes.
+- **Go** (`sdk/go`) — `sdk.New(url, sdk.WithAPIKey(...))`.
+- **TypeScript** (`sdk/typescript`) — `new EvelentClient(url, { apiKey })`.

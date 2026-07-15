@@ -16,13 +16,14 @@ go build -o db.exe .
 You should see:
 
 ```
-Starting server on :8080
+Starting server on 127.0.0.1:8080 (loopback=true, apiKey=false)
 Data directory: ./data
 GOMAXPROCS = 8
 ```
 
 The server creates the data directory and an encryption key (`.key`) on first
-run. Stop it with `Ctrl+C` — it flushes a final KV snapshot before exiting.
+run. It listens on **localhost by default**. Stop it with `Ctrl+C` — it flushes
+a final KV snapshot and document indexes before exiting.
 
 ## 2. Smoke test with curl
 

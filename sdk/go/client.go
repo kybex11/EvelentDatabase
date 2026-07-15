@@ -8,8 +8,21 @@ type Client struct {
 	PubSub      *PubSubService
 }
 
-func New(baseURL string) *Client {
+type Option func(*HTTPClient)
+
+// WithAPIKey attaches X-API-Key to every HTTP request (required when the server
+// is started with -api-key / DB_API_KEY).
+func WithAPIKey(key string) Option {
+	return func(h *HTTPClient) {
+		h.APIKey = key
+	}
+}
+
+func New(baseURL string, opts ...Option) *Client {
 	h := NewHTTPClient(baseURL)
+	for _, o := range opts {
+		o(h)
+	}
 	return &Client{
 		HTTP:        h,
 		Collections: &CollectionsService{http: h},

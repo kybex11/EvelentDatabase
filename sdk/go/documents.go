@@ -43,6 +43,7 @@ func (d *DocumentsService) DeleteByID(id string) error {
 	if err != nil {
 		return err
 	}
+	d.http.applyAuth(req)
 	resp, err := d.http.HTTPClient.Do(req)
 	if err != nil {
 		return err
@@ -56,6 +57,16 @@ func (d *DocumentsService) DeleteByID(id string) error {
 }
 
 func (d *DocumentsService) Find(query FindQuery) ([]map[string]interface{}, error) {
+	res, err := d.FindPage(query)
+	if err != nil {
+		return nil, err
+	}
+	return res.Documents, nil
+}
+
+// FindPage runs a find and returns documents plus nextCursor for keyset pagination
+// (pass cursor or after in the next query).
+func (d *DocumentsService) FindPage(query FindQuery) (*FindResult, error) {
 	if query == nil {
 		query = FindQuery{}
 	}
@@ -68,6 +79,7 @@ func (d *DocumentsService) Find(query FindQuery) ([]map[string]interface{}, erro
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	d.http.applyAuth(req)
 	resp, err := d.http.HTTPClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -77,21 +89,16 @@ func (d *DocumentsService) Find(query FindQuery) ([]map[string]interface{}, erro
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, &APIError{Status: resp.StatusCode, StatusText: resp.Status, Body: raw}
 	}
+	var wrap FindResult
+	if err := json.Unmarshal(raw, &wrap); err == nil && wrap.Documents != nil {
+		return &wrap, nil
+	}
 	var docs []map[string]interface{}
-	if err := json.Unmarshal(raw, &docs); err == nil {
-		if docs == nil {
-			docs = []map[string]interface{}{}
-		}
-		return docs, nil
-	}
-	var wrap struct {
-		Documents []map[string]interface{} `json:"documents"`
-	}
-	if err := json.Unmarshal(raw, &wrap); err != nil {
+	if err := json.Unmarshal(raw, &docs); err != nil {
 		return nil, err
 	}
-	if wrap.Documents == nil {
-		wrap.Documents = []map[string]interface{}{}
+	if docs == nil {
+		docs = []map[string]interface{}{}
 	}
-	return wrap.Documents, nil
+	return &FindResult{Documents: docs}, nil
 }

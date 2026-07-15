@@ -45,7 +45,7 @@ export class PubSubApi {
       try {
         const resp = await fetch(url, {
           method: "GET",
-          headers: { Accept: "text/event-stream" },
+          headers: this.http.authHeaders({ Accept: "text/event-stream" }),
           signal: controller.signal,
         });
         if (!resp.ok || !resp.body) {

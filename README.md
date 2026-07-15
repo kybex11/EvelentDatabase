@@ -11,9 +11,9 @@ store, the key/value store, the data types, and the pub/sub bus.
 
 ## Features
 
-- **Document store** — collections of JSON documents, secondary indexes, rich
-  filters (`$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`, `$in`), sorting,
-  pagination, and index-accelerated equality queries.
+- **Document store** — append-only encrypted segments + id index (built for large
+  on-disk volumes), secondary indexes, rich filters, sorting, pagination, and
+  cursor (`after` / `nextCursor`) scanning.
 - **Redis-like KV store** — `SET/GET/DEL`, per-key TTL, atomic counters,
   `SETNX`, `APPEND`, batch `MSET/MGET/MDEL`, prefix scans, LRU eviction by item
   count or byte size.
@@ -23,9 +23,7 @@ store, the key/value store, the data types, and the pub/sub bus.
   Server-Sent Events.
 - **Sharded cache** — striped locks for high concurrent throughput
   (≈2.7× faster reads than a single lock on 8 cores).
-- **Encryption at rest** — AES-256-GCM for documents, indexes, and the KV snapshot.
-- **Persistence** — the in-memory store snapshots to an encrypted file and
-  reloads on boot; a final snapshot is flushed on graceful shutdown.
+- **Encryption at rest** — AES-256-GCM for documents, indexes, segments, and the KV snapshot.
 - **Two SDKs + a GUI** — Go and TypeScript clients kept in sync with the API,
   plus a Wails/Vue desktop app.
 
@@ -34,7 +32,7 @@ store, the key/value store, the data types, and the pub/sub bus.
 ## Quick start
 
 ```bash
-# 1. Run the server
+# 1. Run the server (localhost by default)
 cd server
 go build -o db.exe .
 ./db.exe -port 8080 -data-dir ./data
@@ -49,7 +47,7 @@ curl         http://127.0.0.1:8080/api/kv/greeting
 ### Go SDK
 
 ```go
-client := sdk.New("http://127.0.0.1:8080")
+client := sdk.New("http://127.0.0.1:8080", sdk.WithAPIKey("secret"))
 client.KV.Set("greeting", "hello", 60)
 client.KV.HSet("user:1", "name", "Ada")
 client.KV.RPush("queue", "a", "b")
@@ -60,7 +58,7 @@ client.KV.RPush("queue", "a", "b")
 ```ts
 import { EvelentClient } from "@evelent/db-sdk";
 
-const db = new EvelentClient("http://127.0.0.1:8080");
+const db = new EvelentClient("http://127.0.0.1:8080", { apiKey: "secret" });
 await db.kv.set("greeting", "hello", 60);
 await db.hash.set("user:1", "name", "Ada");
 db.pubsub.subscribe("room:1", (msg) => console.log(msg));
@@ -75,8 +73,7 @@ EvelentDatabase/
 ├── server/              # the database engine + HTTP API
 │   ├── main.go          # flags, routing, graceful shutdown
 │   ├── handlers/        # HTTP handlers (collections, kv, datatypes, pubsub)
-│   └── internal/db/     # engine: collections, indexes, LRU/sharded cache,
-│                        #         memstore, data types, pub/sub, encryption
+│   └── internal/db/     # engine: segments, indexes, sharded KV, encryption
 ├── sdk/
 │   ├── go/              # Go SDK  (module evelent.dev/db/sdk)
 │   └── typescript/      # TypeScript SDK (@evelent/db-sdk)
@@ -98,7 +95,7 @@ Full docs live in [`docs/`](docs/README.md):
 | [KV store](docs/kv-store.md) | TTL, eviction, persistence |
 | [Data types](docs/data-types.md) | Hash, list, set commands |
 | [Pub/Sub](docs/pubsub.md) | The SSE message bus |
-| [Large volumes](docs/large-data.md) | Batching, indexes, tuning, benchmarks |
+| [Large volumes](docs/large-data.md) | Segments, cursors, indexes, tuning |
 | [Go SDK](docs/sdk-go.md) / [TS SDK](docs/sdk-typescript.md) | Client guides |
 | [Architecture](docs/architecture.md) | How it all fits together |
 
@@ -120,42 +117,37 @@ cd server && go test ./internal/db -bench . -benchmem
 
 Numbers vary by machine — run them on your target hardware.
 
+For **large document collections** (150–500+ GiB), see [Large volumes](docs/large-data.md):
+segment storage, indexes, and cursor pagination matter far more than binary size.
+
 ---
 
 ## Security notes
 
-- **API Key authentication** — set `-api-key` flag or `DB_API_KEY` env variable.
-  All `/api/*` endpoints require the key (via `X-API-Key` header or `?key=`
-  query param). Health checks are exempt. **Without a key the server is open.**
-- **Rate limiting** — per-IP token-bucket limiter (`-rate-limit` req/s,
-  `-rate-burst` burst size). Returns `429 Too Many Requests`.
-- **Request size limit** — `-max-body-size` (default 32 MiB). Oversized bodies
-  get `413 Request Entity Too Large`.
-- **CORS** — configurable via `-cors-origins` (comma-separated, `*` for all).
-- **Path traversal protection** — collection names are validated (no `..`, `/`,
-  `\`, dot-prefixed, max 128 chars).
-- **Security headers** — `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`.
-- Encryption at rest uses a key from `DB_ENCRYPTION_KEY` (64 hex chars) or an
-  auto-generated `.key` in the data directory. Back up the key — without it the
-  data is unrecoverable.
+- **Default bind is loopback** (`127.0.0.1`). Binding `0.0.0.0` / a public IP
+  **without** `-api-key` / `DB_API_KEY` **refuses to start** (escape hatch:
+  `-allow-insecure-open`).
+- **API Key authentication** — pass `X-API-Key` (preferred). `?key=` works but
+  is deprecated. Health checks are exempt.
+- **Rate limiting**, **max body size**, **CORS** (default: none), **security headers**.
+- Encryption at rest uses `DB_ENCRYPTION_KEY` or an auto-generated `.key`.
+  Back up the key — without it the data is unrecoverable.
 
-### Running on a public IP
+### Running behind a public domain
 
 ```bash
-./db.exe -port 2026 -api-key "$(openssl rand -hex 32)" -cors-origins "https://yourdomain.com"
+# DB stays on localhost; nginx/Caddy terminates TLS and proxies /db
+./db.exe -addr 127.0.0.1:7027 -api-key "$(openssl rand -hex 32)" \
+  -cors-origins "https://domain.com"
 ```
 
-Then pass the key in SDK calls:
 ```go
-// Go — custom header via Transport
-req.Header.Set("X-API-Key", "your-key")
-```
-```ts
-// TS — extend the HttpClient or use ?key=...
+client := sdk.New("https://domain.com/db", sdk.WithAPIKey("your-key"))
 ```
 
-For production, also put the server behind a TLS-terminating reverse proxy
-(nginx, Caddy, etc.) so the key and data are encrypted in transit.
+```ts
+const db = new EvelentClient("https://domain.com/db", { apiKey: "your-key" });
+```
 
 ---
 

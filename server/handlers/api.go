@@ -195,7 +195,7 @@ func FindDocumentsHandler(w http.ResponseWriter, r *http.Request) {
 		raw = map[string]interface{}{}
 	}
 	filter, opt := db.ParseFindRequest(raw)
-	docs, err := coll.Find(filter, opt)
+	docs, next, err := coll.FindPage(filter, opt)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -203,7 +203,12 @@ func FindDocumentsHandler(w http.ResponseWriter, r *http.Request) {
 	if docs == nil {
 		docs = []map[string]interface{}{}
 	}
-	writeJSON(w, docs)
+	// Always wrap so clients can read nextCursor; array-only clients still
+	// work via the Documents field in SDKs that accept both shapes.
+	writeJSON(w, map[string]interface{}{
+		"documents":  docs,
+		"nextCursor": next,
+	})
 }
 
 func CreateIndexHandler(w http.ResponseWriter, r *http.Request) {

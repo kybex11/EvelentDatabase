@@ -12,6 +12,7 @@ type FindOptions struct {
 	SortDesc    bool
 	Projection  map[string]interface{}
 	CursorSkip  int
+	AfterID     string
 	ExplicitLim bool
 }
 
@@ -23,7 +24,8 @@ func ParseFindRequest(m map[string]interface{}) (map[string]interface{}, *FindOp
 	_, hasSort := m["sort"]
 	_, hasProj := m["projection"]
 	_, hasCursor := m["cursor"]
-	if !hasFilter && !hasLimit && !hasSkip && !hasSort && !hasProj && !hasCursor {
+	_, hasAfter := m["after"]
+	if !hasFilter && !hasLimit && !hasSkip && !hasSort && !hasProj && !hasCursor && !hasAfter {
 		return m, opt
 	}
 	var filter map[string]interface{}
@@ -57,11 +59,11 @@ func ParseFindRequest(m map[string]interface{}) (map[string]interface{}, *FindOp
 	if pm, ok := m["projection"].(map[string]interface{}); ok {
 		opt.Projection = pm
 	}
+	if after, ok := m["after"].(string); ok && after != "" {
+		opt.AfterID = after
+	}
 	if cs, ok := m["cursor"].(string); ok && cs != "" {
-		if s := decodeCursorSkip(cs); s >= 0 {
-			opt.CursorSkip = s
-			opt.Skip = s
-		}
+		applyCursorToken(cs, opt)
 	}
 	if !opt.ExplicitLim {
 		opt.Limit = DefaultFindLimit
@@ -73,6 +75,28 @@ func ParseFindRequest(m map[string]interface{}) (map[string]interface{}, *FindOp
 		opt.Limit = MaxFindLimit
 	}
 	return filter, opt
+}
+
+func applyCursorToken(s string, opt *FindOptions) {
+	b, err := base64.RawURLEncoding.DecodeString(s)
+	if err != nil {
+		return
+	}
+	var p struct {
+		Skip  int    `json:"skip"`
+		After string `json:"after"`
+	}
+	if err := json.Unmarshal(b, &p); err != nil {
+		return
+	}
+	if p.After != "" {
+		opt.AfterID = p.After
+		return
+	}
+	if p.Skip >= 0 {
+		opt.CursorSkip = p.Skip
+		opt.Skip = p.Skip
+	}
 }
 
 func decodeCursorSkip(s string) int {
@@ -91,5 +115,10 @@ func decodeCursorSkip(s string) int {
 
 func EncodeCursorSkip(skip int) string {
 	b, _ := json.Marshal(map[string]int{"skip": skip})
+	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+func EncodeCursorAfter(afterID string) string {
+	b, _ := json.Marshal(map[string]string{"after": afterID})
 	return base64.RawURLEncoding.EncodeToString(b)
 }

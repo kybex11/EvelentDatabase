@@ -16,6 +16,11 @@ type InsertManyResult struct {
 	Inserted int      `json:"inserted"`
 }
 
+type FindResult struct {
+	Documents  []map[string]interface{} `json:"documents"`
+	NextCursor string                   `json:"nextCursor,omitempty"`
+}
+
 type CollectionStats struct {
 	Count       int64 `json:"count"`
 	StorageSize int64 `json:"storageSize"`

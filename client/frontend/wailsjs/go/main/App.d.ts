@@ -19,6 +19,8 @@ export function FindDocumentsQuery(arg1:string,arg2:Record<string, any>):Promise
 
 export function GetDocument(arg1:string,arg2:string):Promise<Record<string, any>>;
 
+export function GetAPIKey():Promise<string>;
+
 export function GetServerURL():Promise<string>;
 
 export function InsertDocument(arg1:string,arg2:Record<string, any>):Promise<string>;
@@ -42,6 +44,8 @@ export function ListCollections():Promise<Array<string>>;
 export function ListIndexes(arg1:string):Promise<Array<string>>;
 
 export function PingServer():Promise<void>;
+
+export function SetAPIKey(arg1:string):Promise<void>;
 
 export function SetServerURL(arg1:string):Promise<void>;
 

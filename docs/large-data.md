@@ -1,135 +1,129 @@
 # Working with large volumes
 
-Strategies and APIs for moving and querying large amounts of data efficiently.
+Strategies for storing and querying tens to hundreds of gigabytes efficiently.
+
+## Honest limits
+
+| Layer | Where it lives | Scale note |
+|-------|----------------|------------|
+| Document store | Disk (append-only segments) | Designed for **150–500+ GiB** of documents on one host |
+| Secondary indexes | RAM + encrypted sidecar | Cardinality of indexed values must fit in memory |
+| KV / hash / list / set | RAM (+ snapshot) | Bound with `MaxBytes` / `MaxItems`; not for multi-hundred-GB working sets |
+| Binary size (~9 MiB) | N/A | Unrelated to data size (MongoDB’s ~2 GiB installer is the engine + tools) |
+
+## Storage layout (documents)
+
+New writes go into **append-only segment files** (~64 MiB each) plus an encrypted
+`.docindex` map (`id → segment/offset/length`). Legacy per-file documents under
+`docs/` (flat or hex-sharded `docs/ab/id.json`) remain readable.
+
+```
+<data-dir>/<collection>/
+├── .docindex              # encrypted id → location map
+├── segments/000001.seg    # append-only encrypted payloads
+├── docs/…                 # legacy files (still read; writes prefer segments)
+└── indexes/<field>.idx
+```
+
+This avoids millions of tiny files (the usual filesystem cliff at huge
+collections) while keeping O(1) reads by `_id`.
 
 ## 1. Batch document inserts
-
-Insert thousands of documents in a single request instead of one HTTP call per
-document:
 
 ```
 POST /api/collections/{c}/docs/batch
 { "documents": [ {...}, {...}, ... ] }
 ```
 
-```go
-ids, _ := client.Collection("events").Documents().InsertMany(batch)
-```
-
 Group inserts into chunks (e.g. 1,000–10,000 documents) to balance memory and
 round-trips.
 
-## 2. Batch KV operations
+## 2. Keyset (cursor) pagination — prefer over skip
 
-The KV store has dedicated batch primitives so you transfer N keys in one
-round-trip rather than N requests:
+`skip` on huge collections is O(n). Prefer `after` / `cursor`:
+
+```json
+{ "filter": {}, "limit": 1000, "after": "<last_id>" }
+```
+
+Or pass back `nextCursor` from the previous response:
+
+```json
+{ "filter": {}, "limit": 1000, "cursor": "<nextCursor>" }
+```
+
+Response shape:
+
+```json
+{ "documents": [ ... ], "nextCursor": "..." }
+```
 
 ```go
-// Write 50k pairs at once
-items := make([]sdk.KVItem, 0, 50_000)
-for i := 0; i < 50_000; i++ {
-    items = append(items, sdk.KVItem{Key: fmt.Sprintf("k:%d", i), Value: "v"})
-}
-client.KV.MSet(items, 0)
-
-// Read them back in bulk
-got, missing, _ := client.KV.MGet(keys)
+page, _ := client.Collection("events").Documents().FindPage(sdk.FindQuery{
+    "limit": 1000,
+    "cursor": prev,
+})
 ```
 
 ```ts
-await db.kv.mset(items, 0);
-const { items: got, missing } = await db.kv.mget(keys);
-await db.kv.mdel(keys);
+const page = await db.collection("events").documents().findPage({ limit: 1000, cursor });
 ```
 
-## 3. Pagination over query results
+Unsorted scans stream by `_id` order and stop at `limit` without loading the
+whole collection into RAM. Sorted finds still collect then sort (capped).
 
-Use `limit` + `skip` to page through large collections:
+## 3. Indexes
 
-```json
-{ "filter": {}, "sort": { "field": "_id", "order": 1 }, "limit": 1000, "skip": 0 }
-```
-
-Increment `skip` by `limit` each page. Always pair pagination with a stable
-`sort` so pages do not overlap or skip rows.
-
-## 4. Indexes
-
-Create a secondary index on any field you filter or sort by frequently:
+Create a secondary index on fields you filter by equality often:
 
 ```
 POST /api/collections/{c}/indexes  { "field": "email" }
 ```
 
-Indexes are persisted (encrypted) and rebuilt incrementally as documents change.
-Drop indexes you no longer need to keep writes fast.
+Indexed equality loads only matching IDs (then segment reads). Range / `$in` /
+multi-field filters still scan.
+
+## 4. Batch KV operations
+
+Hot caches belong in KV with a byte ceiling — not as a substitute for the
+document store at hundreds of GB.
 
 ## 5. Server tuning
 
 | Setting | Effect |
 |---------|--------|
-| `-gomaxprocs` | Match to available cores for CPU-bound workloads. |
-| `-http-read-timeout` | Raise for very large request bodies. |
-| `-http-write-timeout 0` | Keep `0` for large streamed responses. |
-| `MaxBytes` / `MaxItems` | Cap KV memory so it never exhausts the host. |
+| `-gomaxprocs` | Match available cores |
+| `-http-read-timeout` | Raise for very large request bodies |
+| `-http-write-timeout 0` | Keep `0` for large responses |
+| `MaxBytes` / `MaxItems` | Cap KV memory |
 
-## 6. Memory bounds for the KV store
+## 6. Production fronting
 
-For large hot sets, bound the store by bytes so it self-evicts instead of
-growing without limit:
+Keep the DB on loopback; terminate TLS on the proxy:
 
-```go
-db.NewDatabaseWithOptions("./data", db.MemStoreOptions{
-    MaxBytes:   2 << 30,         // 2 GiB ceiling
-    FlushEvery: 10 * time.Second,
-})
+```nginx
+location /db/ {
+    proxy_pass http://127.0.0.1:7027/;
+    proxy_set_header X-API-Key $http_x_api_key;
+}
 ```
-
-Watch `Stats()` — a rising `evictions` count with a falling `hitRatio` means the
-working set no longer fits and the bound (or host memory) should grow.
-
-## 7. Connection reuse
-
-Both SDKs and the desktop client use a pooled HTTP transport
-(`MaxIdleConnsPerHost` in the hundreds/thousands). Reuse a single client
-instance across goroutines/requests rather than creating one per call.
-
-## Performance notes & tradeoffs
-
-- The KV store uses a **sharded (striped) cache**: keys are hashed across N
-  independent LRU shards, each with its own lock, so operations on keys in
-  different shards never contend. Shard count defaults to `GOMAXPROCS×4`
-  (power of two, capped at 256). Set `Shards: 1` for a single global lock.
-- Item/byte bounds are divided evenly across shards, so the effective ceiling is
-  approximate (rounding can let totals drift slightly above the configured cap).
-- **Indexed equality queries skip the full scan**: a `find` whose filter is a
-  single equality on an indexed field (`{"city":"LA"}` or `{"city":{"$eq":"LA"}}`)
-  loads only the matching documents by ID via the index. Create an index on the
-  field first. Range/`$in`/multi-field filters still scan.
-- Byte accounting is approximate and intended for ceilings, not exact metering.
-- Container types (hash/list/set) serialize their read-modify-write operations
-  through one op-mutex and copy-on-write, trading some throughput for atomicity
-  and freedom from data races.
-
-## Benchmarks
-
-Cache benchmarks live in `server/internal/db/bench_test.go`:
 
 ```bash
-cd server
-go test ./internal/db -bench . -benchmem            # all benchmarks
-go test ./internal/db -bench Parallel -cpu 1,4,8     # scaling with cores
+./db.exe -addr 127.0.0.1:7027 -api-key "$DB_API_KEY" -cors-origins "https://domain.com"
 ```
 
-Representative results (8 cores, Intel i5-11600) showing the sharded cache vs a
-single global lock:
+Never expose an unauthenticated non-loopback bind. The server refuses that by
+default (see [Configuration](configuration.md)).
 
-| Benchmark | Single LRU | Sharded LRU | Speedup |
-|-----------|-----------:|------------:|:-------:|
-| Parallel GET | ~125 ns/op | ~46 ns/op | ~2.7× |
-| Parallel SET | ~173 ns/op | ~99 ns/op | ~1.7× |
-| Mixed 80/20 | ~141 ns/op | ~54 ns/op | ~2.6× |
+## Performance notes
 
-Numbers vary by machine; run them on your target hardware.
+- Segment + docindex: point gets stay O(1) disk reads regardless of collection size.
+- Full collection scans iterate live IDs (and legacy files); use indexes + cursors.
+- KV uses a **sharded LRU** for concurrent small-key workloads.
+- Secondary indexes are in-memory maps — plan RAM accordingly.
+
+```bash
+cd server && go test ./internal/db -bench . -benchmem
+```
 
 Next: [Go SDK guide](sdk-go.md).

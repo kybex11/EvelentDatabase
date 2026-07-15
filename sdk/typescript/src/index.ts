@@ -1,6 +1,8 @@
 export { EvelentClient } from "./client";
+export type { EvelentClientOptions } from "./client";
 export { CollectionScope } from "./collection-scope";
 export { HttpClient } from "./http";
+export type { HttpClientOptions } from "./http";
 export { EvelentError } from "./errors";
 export * from "./types";
 export { CollectionsApi } from "./endpoints/collections";

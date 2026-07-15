@@ -1,4 +1,4 @@
-import { HttpClient } from "./http";
+import { HttpClient, HttpClientOptions } from "./http";
 import { CollectionsApi } from "./endpoints/collections";
 import { HealthApi } from "./endpoints/health";
 import { KVApi } from "./endpoints/kv";
@@ -7,6 +7,8 @@ import { ListApi } from "./endpoints/list";
 import { SetApi } from "./endpoints/set";
 import { PubSubApi } from "./endpoints/pubsub";
 import { CollectionScope } from "./collection-scope";
+
+export type EvelentClientOptions = HttpClientOptions;
 
 export class EvelentClient {
   readonly http: HttpClient;
@@ -23,8 +25,8 @@ export class EvelentClient {
   /** Publish/subscribe broker. */
   readonly pubsub: PubSubApi;
 
-  constructor(baseUrl: string) {
-    this.http = new HttpClient(baseUrl);
+  constructor(baseUrl: string, options?: EvelentClientOptions) {
+    this.http = new HttpClient(baseUrl, options);
     this.collections = new CollectionsApi(this.http);
     this.health = new HealthApi(this.http);
     this.kv = new KVApi(this.http);
@@ -34,8 +36,8 @@ export class EvelentClient {
     this.pubsub = new PubSubApi(this.http);
   }
 
-  static connect(baseUrl: string): EvelentClient {
-    return new EvelentClient(baseUrl);
+  static connect(baseUrl: string, options?: EvelentClientOptions): EvelentClient {
+    return new EvelentClient(baseUrl, options);
   }
 
   collection(name: string): CollectionScope {

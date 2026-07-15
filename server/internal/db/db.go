@@ -143,10 +143,20 @@ func (db *Database) PubSub() *Broker {
 	return db.broker
 }
 
-// Close flushes the in-memory store to disk and stops its background workers.
+// Close flushes the in-memory store and all open collections.
 func (db *Database) Close() error {
-	if db.kv != nil {
-		return db.kv.Close()
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	var first error
+	for name, coll := range db.collections {
+		if err := coll.Close(); err != nil && first == nil {
+			first = fmt.Errorf("close collection %s: %w", name, err)
+		}
 	}
-	return nil
+	if db.kv != nil {
+		if err := db.kv.Close(); err != nil && first == nil {
+			first = err
+		}
+	}
+	return first
 }

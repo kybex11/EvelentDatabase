@@ -55,6 +55,7 @@ func (s *PubSubService) Subscribe(ctx context.Context, channel string) (*Subscri
 		return nil, err
 	}
 	req.Header.Set("Accept", "text/event-stream")
+	s.http.applyAuth(req)
 	resp, err := s.http.HTTPClient.Do(req)
 	if err != nil {
 		cancel()

@@ -32,6 +32,7 @@ func (s *IndexesService) Drop(field string) error {
 	if err != nil {
 		return err
 	}
+	s.http.applyAuth(req)
 	resp, err := s.http.HTTPClient.Do(req)
 	if err != nil {
 		return err

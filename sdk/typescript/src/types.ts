@@ -61,6 +61,13 @@ export interface FindQuery {
   sort?: SortSpec;
   projection?: Projection;
   cursor?: string;
+  /** Keyset pagination: return documents with _id greater than this value. */
+  after?: string;
+}
+
+export interface FindResult {
+  documents: Document[];
+  nextCursor?: string;
 }
 
 export interface CollectionStats {

@@ -1,4 +1,4 @@
-package main
+﻿package main
 
 import (
 	"bytes"
@@ -18,11 +18,13 @@ import (
 type App struct {
 	ctx       context.Context
 	serverURL string
+	apiKey    string
 	client    *http.Client
 }
 
 type clientConfig struct {
 	BaseURL string `json:"baseURL"`
+	APIKey  string `json:"apiKey,omitempty"`
 }
 
 func configFilePath() (string, error) {
@@ -37,35 +39,36 @@ func configFilePath() (string, error) {
 	return filepath.Join(dir, "client.json"), nil
 }
 
-func loadServerURL() string {
+func loadClientConfig() (baseURL, apiKey string) {
+	defaultURL := "http://127.0.0.1:2026"
 	p, err := configFilePath()
 	if err != nil {
-		return "http://127.0.0.1:8080"
+		return defaultURL, ""
 	}
 	data, err := os.ReadFile(p)
 	if err != nil {
-		return "http://127.0.0.1:8080"
+		return defaultURL, ""
 	}
 	var c clientConfig
 	if err := json.Unmarshal(data, &c); err != nil {
-		return "http://127.0.0.1:8080"
+		return defaultURL, ""
 	}
 	if c.BaseURL == "" {
-		return "http://127.0.0.1:8080"
+		return defaultURL, c.APIKey
 	}
 	u, err := normalizeServerURL(c.BaseURL)
 	if err != nil {
-		return "http://127.0.0.1:8080"
+		return defaultURL, c.APIKey
 	}
-	return u
+	return u, c.APIKey
 }
 
-func saveServerURL(base string) error {
+func saveClientConfig(base, apiKey string) error {
 	p, err := configFilePath()
 	if err != nil {
 		return err
 	}
-	c := clientConfig{BaseURL: base}
+	c := clientConfig{BaseURL: base, APIKey: apiKey}
 	data, err := json.Marshal(c)
 	if err != nil {
 		return err
@@ -80,7 +83,7 @@ func saveServerURL(base string) error {
 func normalizeServerURL(raw string) (string, error) {
 	s := strings.TrimSpace(raw)
 	if s == "" {
-		return "http://127.0.0.1:8080", nil
+		return "http://127.0.0.1:2026", nil
 	}
 	if !strings.Contains(s, "://") {
 		s = "http://" + s
@@ -117,9 +120,10 @@ func newHTTPClient() *http.Client {
 }
 
 func NewApp() *App {
-	u := loadServerURL()
+	u, key := loadClientConfig()
 	return &App{
 		serverURL: u,
+		apiKey:    key,
 		client:    newHTTPClient(),
 	}
 }
@@ -132,8 +136,18 @@ func (a *App) base() string {
 	return strings.TrimSuffix(a.serverURL, "/")
 }
 
+func (a *App) applyAuth(req *http.Request) {
+	if a.apiKey != "" {
+		req.Header.Set("X-API-Key", a.apiKey)
+	}
+}
+
 func (a *App) GetServerURL() string {
 	return a.serverURL
+}
+
+func (a *App) GetAPIKey() string {
+	return a.apiKey
 }
 
 func (a *App) SetServerURL(raw string) error {
@@ -141,11 +155,20 @@ func (a *App) SetServerURL(raw string) error {
 	if err != nil {
 		return err
 	}
-	if err := saveServerURL(u); err != nil {
+	if err := saveClientConfig(u, a.apiKey); err != nil {
 		return err
 	}
 	a.serverURL = u
 	a.client = newHTTPClient()
+	return nil
+}
+
+func (a *App) SetAPIKey(key string) error {
+	key = strings.TrimSpace(key)
+	if err := saveClientConfig(a.serverURL, key); err != nil {
+		return err
+	}
+	a.apiKey = key
 	return nil
 }
 
@@ -180,6 +203,7 @@ func (a *App) getJSON(url string, out interface{}) error {
 	if err != nil {
 		return err
 	}
+	a.applyAuth(req)
 	resp, err := a.client.Do(req)
 	if err != nil {
 		return err
@@ -190,6 +214,28 @@ func (a *App) getJSON(url string, out interface{}) error {
 		return fmt.Errorf("%s", body)
 	}
 	return json.Unmarshal(body, out)
+}
+
+func (a *App) doJSON(method, urlStr string, payload []byte) ([]byte, int, error) {
+	var rdr io.Reader
+	if payload != nil {
+		rdr = bytes.NewReader(payload)
+	}
+	req, err := http.NewRequestWithContext(a.ctxOrBg(), method, urlStr, rdr)
+	if err != nil {
+		return nil, 0, err
+	}
+	if payload != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	a.applyAuth(req)
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	return body, resp.StatusCode, nil
 }
 
 func (a *App) ListCollections() ([]string, error) {
@@ -207,30 +253,22 @@ func (a *App) CreateCollection(name string) error {
 	if err != nil {
 		return err
 	}
-	resp, err := a.client.Post(a.base()+"/api/collections", "application/json", bytes.NewReader(data))
+	body, status, err := a.doJSON(http.MethodPost, a.base()+"/api/collections", data)
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusCreated {
+	if status != http.StatusCreated {
 		return fmt.Errorf("%s", body)
 	}
 	return nil
 }
 
 func (a *App) DropCollection(name string) error {
-	req, err := http.NewRequest(http.MethodDelete, a.base()+"/api/collections/"+url.PathEscape(name), nil)
+	body, status, err := a.doJSON(http.MethodDelete, a.base()+"/api/collections/"+url.PathEscape(name), nil)
 	if err != nil {
 		return err
 	}
-	resp, err := a.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusNoContent {
+	if status != http.StatusNoContent {
 		return fmt.Errorf("%s", body)
 	}
 	return nil
@@ -241,16 +279,11 @@ func (a *App) InsertDocument(collection string, doc map[string]interface{}) (str
 	if err != nil {
 		return "", err
 	}
-	resp, err := a.client.Post(a.base()+"/api/collections/"+url.PathEscape(collection)+"/docs", "application/json", bytes.NewReader(data))
+	body, status, err := a.doJSON(http.MethodPost, a.base()+"/api/collections/"+url.PathEscape(collection)+"/docs", data)
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
-	}
-	if resp.StatusCode != http.StatusOK {
+	if status != http.StatusOK {
 		return "", fmt.Errorf("%s", body)
 	}
 	var result map[string]string
@@ -271,35 +304,22 @@ func (a *App) UpdateDocument(collection, id string, update map[string]interface{
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest(http.MethodPut, a.base()+"/api/collections/"+url.PathEscape(collection)+"/docs/"+url.PathEscape(id), bytes.NewReader(data))
+	body, status, err := a.doJSON(http.MethodPut, a.base()+"/api/collections/"+url.PathEscape(collection)+"/docs/"+url.PathEscape(id), data)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := a.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
+	if status != http.StatusOK {
 		return fmt.Errorf("%s", body)
 	}
 	return nil
 }
 
 func (a *App) DeleteDocument(collection, id string) error {
-	req, err := http.NewRequest(http.MethodDelete, a.base()+"/api/collections/"+url.PathEscape(collection)+"/docs/"+url.PathEscape(id), nil)
+	body, status, err := a.doJSON(http.MethodDelete, a.base()+"/api/collections/"+url.PathEscape(collection)+"/docs/"+url.PathEscape(id), nil)
 	if err != nil {
 		return err
 	}
-	resp, err := a.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusNoContent {
+	if status != http.StatusNoContent {
 		return fmt.Errorf("%s", body)
 	}
 	return nil
@@ -314,16 +334,11 @@ func (a *App) FindDocumentsQuery(collection string, query map[string]interface{}
 	if err != nil {
 		return nil, err
 	}
-	resp, err := a.client.Post(a.base()+"/api/collections/"+url.PathEscape(collection)+"/find", "application/json", bytes.NewReader(data))
+	body, status, err := a.doJSON(http.MethodPost, a.base()+"/api/collections/"+url.PathEscape(collection)+"/find", data)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode != http.StatusOK {
+	if status != http.StatusOK {
 		return nil, fmt.Errorf("%s", body)
 	}
 	var docs []map[string]interface{}
@@ -335,6 +350,7 @@ func (a *App) FindDocumentsQuery(collection string, query map[string]interface{}
 	}
 	var wrap struct {
 		Documents []map[string]interface{} `json:"documents"`
+		NextCursor string                  `json:"nextCursor"`
 	}
 	if err := json.Unmarshal(body, &wrap); err != nil {
 		return nil, err
@@ -351,13 +367,11 @@ func (a *App) CreateIndex(collection, field string) error {
 	if err != nil {
 		return err
 	}
-	resp, err := a.client.Post(a.base()+"/api/collections/"+url.PathEscape(collection)+"/indexes", "application/json", bytes.NewReader(data))
+	body, status, err := a.doJSON(http.MethodPost, a.base()+"/api/collections/"+url.PathEscape(collection)+"/indexes", data)
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusCreated {
+	if status != http.StatusCreated {
 		return fmt.Errorf("%s", body)
 	}
 	return nil
@@ -373,17 +387,11 @@ func (a *App) ListIndexes(collection string) ([]string, error) {
 }
 
 func (a *App) DropIndex(collection, field string) error {
-	req, err := http.NewRequest(http.MethodDelete, a.base()+"/api/collections/"+url.PathEscape(collection)+"/indexes/"+url.PathEscape(field), nil)
+	body, status, err := a.doJSON(http.MethodDelete, a.base()+"/api/collections/"+url.PathEscape(collection)+"/indexes/"+url.PathEscape(field), nil)
 	if err != nil {
 		return err
 	}
-	resp, err := a.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusNoContent {
+	if status != http.StatusNoContent {
 		return fmt.Errorf("%s", body)
 	}
 	return nil
@@ -423,6 +431,7 @@ func (a *App) KVGet(key string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	a.applyAuth(req)
 	resp, err := a.client.Do(req)
 	if err != nil {
 		return "", err
@@ -451,18 +460,11 @@ func (a *App) KVSet(key, value string, ttlSeconds float64) error {
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest(http.MethodPut, a.base()+"/api/kv/"+url.PathEscape(key), bytes.NewReader(data))
+	body, status, err := a.doJSON(http.MethodPut, a.base()+"/api/kv/"+url.PathEscape(key), data)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := a.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+	if status < 200 || status >= 300 {
 		return fmt.Errorf("%s", body)
 	}
 	return nil
@@ -470,17 +472,11 @@ func (a *App) KVSet(key, value string, ttlSeconds float64) error {
 
 // KVDelete removes a key.
 func (a *App) KVDelete(key string) error {
-	req, err := http.NewRequest(http.MethodDelete, a.base()+"/api/kv/"+url.PathEscape(key), nil)
+	body, status, err := a.doJSON(http.MethodDelete, a.base()+"/api/kv/"+url.PathEscape(key), nil)
 	if err != nil {
 		return err
 	}
-	resp, err := a.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotFound {
+	if status != http.StatusNoContent && status != http.StatusNotFound {
 		return fmt.Errorf("%s", body)
 	}
 	return nil
@@ -490,13 +486,11 @@ func (a *App) KVDelete(key string) error {
 func (a *App) KVIncr(key string, delta int64) (int64, error) {
 	payload := map[string]interface{}{"delta": delta}
 	data, _ := json.Marshal(payload)
-	resp, err := a.client.Post(a.base()+"/api/kv/"+url.PathEscape(key)+"/incr", "application/json", bytes.NewReader(data))
+	body, status, err := a.doJSON(http.MethodPost, a.base()+"/api/kv/"+url.PathEscape(key)+"/incr", data)
 	if err != nil {
 		return 0, err
 	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+	if status < 200 || status >= 300 {
 		return 0, fmt.Errorf("%s", body)
 	}
 	var out struct {
@@ -517,13 +511,11 @@ func (a *App) KVStats() (map[string]interface{}, error) {
 
 // KVFlush removes every key from the in-memory store.
 func (a *App) KVFlush() error {
-	resp, err := a.client.Post(a.base()+"/api/kv/flush", "application/json", nil)
+	body, status, err := a.doJSON(http.MethodPost, a.base()+"/api/kv/flush", nil)
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+	if status < 200 || status >= 300 {
 		return fmt.Errorf("%s", body)
 	}
 	return nil

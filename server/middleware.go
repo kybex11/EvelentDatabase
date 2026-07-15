@@ -13,7 +13,8 @@ import (
 // ---------------------------------------------------------------------------
 
 // authMiddleware rejects requests that don't carry a valid API key.
-// The key is passed via the X-API-Key header or the ?key= query parameter.
+// Prefer the X-API-Key header. The ?key= query parameter is deprecated
+// (leaks into access logs) but still accepted for compatibility.
 // Health checks are exempt so monitoring probes still work without a key.
 func authMiddleware(apiKey string, next http.Handler) http.Handler {
 	keyBytes := []byte(apiKey)
@@ -31,7 +32,7 @@ func authMiddleware(apiKey string, next http.Handler) http.Handler {
 
 		provided := r.Header.Get("X-API-Key")
 		if provided == "" {
-			provided = r.URL.Query().Get("key")
+			provided = r.URL.Query().Get("key") // deprecated
 		}
 		if provided == "" || subtle.ConstantTimeCompare(keyBytes, []byte(provided)) != 1 {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
@@ -46,11 +47,19 @@ func authMiddleware(apiKey string, next http.Handler) http.Handler {
 // ---------------------------------------------------------------------------
 
 func corsMiddleware(allowedOrigins string, next http.Handler) http.Handler {
-	origins := strings.Split(allowedOrigins, ",")
-	for i := range origins {
-		origins[i] = strings.TrimSpace(origins[i])
+	raw := strings.TrimSpace(allowedOrigins)
+	var origins []string
+	allowAll := false
+	if raw == "*" {
+		allowAll = true
+	} else if raw != "" {
+		for _, o := range strings.Split(raw, ",") {
+			o = strings.TrimSpace(o)
+			if o != "" {
+				origins = append(origins, o)
+			}
+		}
 	}
-	allowAll := len(origins) == 1 && origins[0] == "*"
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")

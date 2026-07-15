@@ -1,7 +1,8 @@
 # HTTP API reference
 
 Base URL: `http://<host>:<port>`. All request and response bodies are JSON
-unless noted. CORS is enabled for all origins.
+unless noted. CORS origins are controlled by `-cors-origins` (empty by default).
+Authenticated APIs require the `X-API-Key` header when the server has an API key.
 
 ## Health
 
@@ -26,7 +27,7 @@ unless noted. CORS is enabled for all origins.
 | `GET` | `/api/collections/{c}/docs/{id}` | — | the document |
 | `PUT` | `/api/collections/{c}/docs/{id}` | replacement document | `200 OK` |
 | `DELETE` | `/api/collections/{c}/docs/{id}` | — | `204 No Content` |
-| `POST` | `/api/collections/{c}/find` | query (below) | `[ ...documents ]` |
+| `POST` | `/api/collections/{c}/find` | query (below) | `{"documents":[...],"nextCursor":"..."}` |
 
 If a document has no `_id`, one is generated (UUID) and returned.
 
@@ -37,9 +38,13 @@ If a document has no `_id`, one is generated (UUID) and returned.
   "filter": { "age": { "$gte": 18 }, "active": true },
   "limit": 100,
   "skip": 0,
+  "after": "<last_id>",
+  "cursor": "<nextCursor from previous page>",
   "sort": { "field": "age", "order": -1 }
 }
 ```
+
+Prefer `after` / `cursor` over large `skip` values on big collections.
 
 Supported filter operators: `$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`, `$in`.
 A bare value (e.g. `"active": true`) is shorthand for `$eq`. `order: -1` sorts

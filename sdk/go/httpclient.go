@@ -12,6 +12,7 @@ import (
 
 type HTTPClient struct {
 	BaseURL    string
+	APIKey     string
 	HTTPClient *http.Client
 }
 
@@ -34,6 +35,12 @@ func (c *HTTPClient) URL(path string) string {
 	return c.BaseURL + path
 }
 
+func (c *HTTPClient) applyAuth(req *http.Request) {
+	if c.APIKey != "" {
+		req.Header.Set("X-API-Key", c.APIKey)
+	}
+}
+
 func (c *HTTPClient) DoJSON(method, path string, body interface{}, out interface{}) error {
 	var rdr io.Reader
 	if body != nil {
@@ -50,6 +57,7 @@ func (c *HTTPClient) DoJSON(method, path string, body interface{}, out interface
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	c.applyAuth(req)
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
 		return err
@@ -70,6 +78,7 @@ func (c *HTTPClient) DoText(method, path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	c.applyAuth(req)
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
 		return "", err
