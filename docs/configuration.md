@@ -20,6 +20,7 @@ The server is configured through command-line flags and environment variables.
 | `-max-body-size` | `33554432` (32 MiB) | Maximum request body in bytes. Oversized → `413`. |
 | `-rate-limit` | `200` | Token-bucket rate: requests per second per IP. |
 | `-rate-burst` | `500` | Token-bucket burst (max tokens accumulated per IP). |
+| `-sync-mode` | `none` | Document segment durability: `none` (fastest), `every_sec` (fsync ~1s), `every_write` (fsync each append). |
 
 A bare positional argument is also accepted as the port: `./db.exe 9090` → `127.0.0.1:9090`.
 
@@ -72,17 +73,21 @@ When embedding the engine directly (not via the binary), open the database with
 bounds for the KV store:
 
 ```go
-database, err := db.NewDatabaseWithOptions("./data", db.MemStoreOptions{
-    MaxItems:   1_000_000,        // 0 = unbounded by count
-    MaxBytes:   512 << 20,        // 512 MiB; 0 = unbounded by size
-    Shards:     0,                // 0 = auto (sized to the machine); 1 = single lock
-    FlushEvery: 5 * time.Second,  // background snapshot interval
-    SweepEvery: 1 * time.Second,  // background TTL sweep interval
+database, err := db.OpenDatabase("./data", db.DatabaseOptions{
+    SyncMode: db.SyncEverySecond, // none | every_sec | every_write
+    KV: db.MemStoreOptions{
+        MaxItems:   1_000_000,        // 0 = unbounded by count
+        MaxBytes:   512 << 20,        // 512 MiB; 0 = unbounded by size
+        Shards:     0,                // 0 = auto (sized to the machine); 1 = single lock
+        FlushEvery: 5 * time.Second,  // background snapshot interval
+        SweepEvery: 1 * time.Second,  // background TTL sweep interval
+    },
 })
 ```
 
 | Option | Default | Meaning |
 |--------|---------|---------|
+| `SyncMode` | `SyncNone` | Segment fsync policy (`none` / `every_sec` / `every_write`). |
 | `MaxItems` | `0` (unbounded) | Evict LRU entries once the key count exceeds this. |
 | `MaxBytes` | `0` (unbounded) | Evict LRU entries once approximate footprint exceeds this. |
 | `Shards` | `0` (auto) | Number of striped cache shards. `0` sizes it to the machine (`GOMAXPROCS×4`, power of two, ≤256); `1` forces a single lock. Bounds are split evenly across shards. |
@@ -91,5 +96,7 @@ database, err := db.NewDatabaseWithOptions("./data", db.MemStoreOptions{
 
 The default binary uses these defaults; the snapshot lives at
 `<data-dir>/.kvstore` and is AES-256-GCM encrypted with the same key as documents.
+
+Russian guides: [architecture.ru.md](architecture.ru.md) · [performance.ru.md](performance.ru.md).
 
 Next: [HTTP API reference](http-api.md) · [Large volumes](large-data.md).

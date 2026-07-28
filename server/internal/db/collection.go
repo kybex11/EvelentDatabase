@@ -25,14 +25,33 @@ type Collection struct {
 	readers      *segReaders
 	docCache     *LRU
 	indexesDirty bool
+	syncMode     SyncMode
+	segDirty     bool
 
-	stopCh   chan struct{}
-	flushWG  sync.WaitGroup
-	stopped  bool
-	mu       sync.RWMutex
+	stopCh  chan struct{}
+	flushWG sync.WaitGroup
+	stopped bool
+	mu      sync.RWMutex
+}
+
+// SetSyncMode updates the durability policy for segment appends.
+func (c *Collection) SetSyncMode(mode SyncMode) {
+	c.mu.Lock()
+	c.syncMode = mode
+	c.mu.Unlock()
+}
+
+func (c *Collection) SyncMode() SyncMode {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.syncMode
 }
 
 func NewCollection(name, dir string, encKey []byte) (*Collection, error) {
+	return NewCollectionWithSync(name, dir, encKey, SyncNone)
+}
+
+func NewCollectionWithSync(name, dir string, encKey []byte, syncMode SyncMode) (*Collection, error) {
 	docsDir := filepath.Join(dir, "docs")
 	segDir := filepath.Join(dir, "segments")
 	indexesDir := filepath.Join(dir, "indexes")
@@ -59,6 +78,7 @@ func NewCollection(name, dir string, encKey []byte) (*Collection, error) {
 		docIndex: didx,
 		readers:  newSegReaders(segDir),
 		docCache: NewLRU(DefaultDocCacheItems, DefaultDocCacheBytes),
+		syncMode: syncMode,
 		stopCh:   make(chan struct{}),
 	}
 	if err := coll.openLatestSegment(); err != nil {
@@ -141,6 +161,12 @@ func (c *Collection) appendDocLocked(ciphertext []byte) (DocLoc, error) {
 		return DocLoc{}, err
 	}
 	c.curSize += int64(4 + length)
+	switch c.syncMode {
+	case SyncEveryWrite:
+		_ = c.curFile.Sync()
+	default:
+		c.segDirty = true
+	}
 	return DocLoc{Seg: c.curSeg, Offset: off, Length: length}, nil
 }
 
@@ -159,6 +185,10 @@ func (c *Collection) metaFlushLoop(every time.Duration) {
 			return
 		case <-t.C:
 			c.mu.Lock()
+			if c.segDirty && c.syncMode == SyncEverySecond && c.curFile != nil {
+				_ = c.curFile.Sync()
+				c.segDirty = false
+			}
 			_ = c.flushMetaLocked()
 			compactTick++
 			if compactTick >= 30 { // ~every 30s
@@ -202,6 +232,10 @@ func (c *Collection) Close() error {
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.segDirty && c.curFile != nil {
+		_ = c.curFile.Sync()
+		c.segDirty = false
+	}
 	if err := c.flushMetaLocked(); err != nil {
 		return err
 	}
@@ -463,6 +497,25 @@ func (c *Collection) Find(filter map[string]interface{}, opts *FindOptions) ([]m
 		}
 	}
 
+	// Fast path: indexed range ($gt/$gte/$lt/$lte on one field).
+	if spec, ok := RangeIndexFilter(filter); ok {
+		if idx, has := c.indexes[spec.Field]; has {
+			ids := append([]string(nil), idx.FindRange(spec.Lo, spec.Hi, spec.LoIncl, spec.HiIncl)...)
+			sort.Strings(ids)
+			for _, id := range ids {
+				if opts.AfterID != "" && id <= opts.AfterID {
+					continue
+				}
+				doc, err := c.readDocCached(id)
+				if err != nil {
+					continue
+				}
+				results = append(results, doc)
+			}
+			return c.finalizeFind(results, opts), nil
+		}
+	}
+
 	// Streaming scan: segment index + legacy files, ordered by id when unsorted.
 	needSort := opts.SortField != ""
 	after := opts.AfterID
@@ -630,14 +683,43 @@ func (c *Collection) finalizeFind(results []map[string]interface{}, opts *FindOp
 	return results
 }
 
+// CollectionStats is a richer snapshot for observability endpoints.
+type CollectionStats struct {
+	Docs      int64    `json:"docs"`
+	Bytes     int64    `json:"bytes"`
+	Segments  int      `json:"segments"`
+	Indexes   []string `json:"indexes"`
+	SyncMode  string   `json:"syncMode"`
+	DocCache  LRUStats `json:"docCache"`
+}
+
 func (c *Collection) Stats() (docCount int64, totalBytes int64, err error) {
+	st, err := c.StatsDetailed()
+	return st.Docs, st.Bytes, err
+}
+
+func (c *Collection) StatsDetailed() (CollectionStats, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	docCount = c.docIndex.LiveCount()
-	totalBytes = c.docIndex.ApproximateBytes()
+	st := CollectionStats{
+		Docs:     c.docIndex.LiveCount(),
+		Bytes:    c.docIndex.ApproximateBytes(),
+		SyncMode: c.syncMode.String(),
+		Indexes:  make([]string, 0, len(c.indexes)),
+	}
+	if c.docCache != nil {
+		st.DocCache = c.docCache.Stats()
+	}
+	for f := range c.indexes {
+		st.Indexes = append(st.Indexes, f)
+	}
+	sort.Strings(st.Indexes)
+	if nums, err := listSegmentNumbers(c.segDir); err == nil {
+		st.Segments = len(nums)
+	}
 
-	err = c.walkLegacyDocFiles(func(path string) error {
+	err := c.walkLegacyDocFiles(func(path string) error {
 		id := legacyIDFromPath(path)
 		if c.docIndex.Has(id) {
 			return nil
@@ -646,11 +728,11 @@ func (c *Collection) Stats() (docCount int64, totalBytes int64, err error) {
 		if err != nil {
 			return nil
 		}
-		docCount++
-		totalBytes += info.Size()
+		st.Docs++
+		st.Bytes += info.Size()
 		return nil
 	})
-	return docCount, totalBytes, err
+	return st, err
 }
 
 func (c *Collection) ListIndexes() []string {

@@ -15,6 +15,7 @@ type Database struct {
 	encKey      []byte
 	kv          *MemStore
 	broker      *Broker
+	syncMode    SyncMode
 	mu          sync.RWMutex
 }
 
@@ -28,6 +29,12 @@ type MemStoreOptions struct {
 	SweepEvery time.Duration
 }
 
+// DatabaseOptions configures both the KV store and document durability.
+type DatabaseOptions struct {
+	KV       MemStoreOptions
+	SyncMode SyncMode
+}
+
 func NewDatabase(rootDir string) (*Database, error) {
 	return NewDatabaseWithOptions(rootDir, MemStoreOptions{})
 }
@@ -35,6 +42,11 @@ func NewDatabase(rootDir string) (*Database, error) {
 // NewDatabaseWithOptions opens (or creates) a database at rootDir and brings up
 // the embedded in-memory store with the supplied bounds.
 func NewDatabaseWithOptions(rootDir string, kvOpts MemStoreOptions) (*Database, error) {
+	return OpenDatabase(rootDir, DatabaseOptions{KV: kvOpts})
+}
+
+// OpenDatabase opens a database with full options (KV + sync mode).
+func OpenDatabase(rootDir string, opts DatabaseOptions) (*Database, error) {
 	if err := os.MkdirAll(rootDir, 0755); err != nil {
 		return nil, err
 	}
@@ -46,7 +58,9 @@ func NewDatabaseWithOptions(rootDir string, kvOpts MemStoreOptions) (*Database, 
 		rootDir:     rootDir,
 		collections: make(map[string]*Collection),
 		encKey:      encKey,
+		syncMode:    opts.SyncMode,
 	}
+	kvOpts := opts.KV
 	flushEvery := kvOpts.FlushEvery
 	if flushEvery == 0 {
 		flushEvery = 5 * time.Second
@@ -78,7 +92,7 @@ func NewDatabaseWithOptions(rootDir string, kvOpts MemStoreOptions) (*Database, 
 			continue
 		}
 		collDir := filepath.Join(rootDir, e.Name())
-		coll, err := NewCollection(e.Name(), collDir, db.encKey)
+		coll, err := NewCollectionWithSync(e.Name(), collDir, db.encKey, db.syncMode)
 		if err != nil {
 			fmt.Printf("Warning: cannot load collection %s: %v\n", e.Name(), err)
 			continue
@@ -101,7 +115,7 @@ func (db *Database) GetCollection(name string) (*Collection, error) {
 		return coll, nil
 	}
 	collDir := filepath.Join(db.rootDir, name)
-	coll, err := NewCollection(name, collDir, db.encKey)
+	coll, err := NewCollectionWithSync(name, collDir, db.encKey, db.syncMode)
 	if err != nil {
 		return nil, err
 	}
@@ -131,6 +145,40 @@ func (db *Database) ListCollections() ([]string, error) {
 		names = append(names, n)
 	}
 	return names, nil
+}
+
+// SetSyncMode applies a durability policy to all currently open collections
+// and to collections opened later.
+func (db *Database) SetSyncMode(mode SyncMode) {
+	db.mu.Lock()
+	db.syncMode = mode
+	for _, coll := range db.collections {
+		coll.SetSyncMode(mode)
+	}
+	db.mu.Unlock()
+}
+
+func (db *Database) SyncMode() SyncMode {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	return db.syncMode
+}
+
+// CompactAll runs compaction on every open collection.
+func (db *Database) CompactAll() error {
+	db.mu.RLock()
+	colls := make([]*Collection, 0, len(db.collections))
+	for _, c := range db.collections {
+		colls = append(colls, c)
+	}
+	db.mu.RUnlock()
+	var first error
+	for _, c := range colls {
+		if err := c.Compact(); err != nil && first == nil {
+			first = err
+		}
+	}
+	return first
 }
 
 // KV returns the embedded in-memory key/value store.

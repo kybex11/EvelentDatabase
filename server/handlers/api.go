@@ -267,14 +267,18 @@ func CollectionStatsHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	n, bytes, err := coll.Stats()
+	st, err := coll.StatsDetailed()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, map[string]interface{}{
-		"count":       n,
-		"storageSize": bytes,
+		"count":       st.Docs,
+		"storageSize": st.Bytes,
+		"segments":    st.Segments,
+		"indexes":     st.Indexes,
+		"syncMode":    st.SyncMode,
+		"docCache":    st.DocCache,
 	})
 }
 

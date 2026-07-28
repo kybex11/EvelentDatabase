@@ -4,15 +4,28 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 )
 
-// Index is an equality secondary index: canonical field value → set of doc IDs.
-// On disk it is still stored as map[string][]string for compatibility; in memory
-// IDs live in a set so Delete is O(1) and duplicates cannot accumulate.
+// Index is an equality + range secondary index.
+// Equality: canonical field value → set of doc IDs (O(1)).
+// Range: parallel sorted numeric / string buckets for $gt/$gte/$lt/$lte.
 type Index struct {
 	field string
 	data  map[string]map[string]struct{}
+	nums  []numBucket // sorted by v ascending
+	strs  []strBucket // sorted by s ascending
+}
+
+type numBucket struct {
+	v   float64
+	ids map[string]struct{}
+}
+
+type strBucket struct {
+	s   string
+	ids map[string]struct{}
 }
 
 func NewIndex(field string) *Index {
@@ -35,15 +48,27 @@ func LoadIndex(path string, encKey []byte) (*Index, error) {
 	if err := json.Unmarshal(plain, &idxData); err != nil {
 		return nil, err
 	}
-	data := make(map[string]map[string]struct{}, len(idxData))
+	idx := NewIndex("")
 	for k, ids := range idxData {
 		set := make(map[string]struct{}, len(ids))
 		for _, id := range ids {
 			set[id] = struct{}{}
 		}
-		data[k] = set
+		idx.data[k] = set
+		if len(k) >= 2 && k[0] == '"' {
+			var s string
+			if json.Unmarshal([]byte(k), &s) == nil {
+				for id := range set {
+					idx.addStr(s, id)
+				}
+			}
+		} else if n, err := strconv.ParseFloat(k, 64); err == nil {
+			for id := range set {
+				idx.addNum(n, id)
+			}
+		}
 	}
-	return &Index{data: data}, nil
+	return idx, nil
 }
 
 func (idx *Index) Save(path string, encKey []byte) error {
@@ -82,6 +107,11 @@ func (idx *Index) Insert(doc map[string]interface{}) {
 		idx.data[key] = set
 	}
 	set[id] = struct{}{}
+	if n, ok := toFloat64(val); ok {
+		idx.addNum(n, id)
+	} else if s, ok := val.(string); ok {
+		idx.addStr(s, id)
+	}
 }
 
 func (idx *Index) Delete(doc map[string]interface{}) {
@@ -99,6 +129,11 @@ func (idx *Index) Delete(doc map[string]interface{}) {
 	if len(set) == 0 {
 		delete(idx.data, key)
 	}
+	if n, ok := toFloat64(val); ok {
+		idx.delNum(n, id)
+	} else if s, ok := val.(string); ok {
+		idx.delStr(s, id)
+	}
 }
 
 // Find returns the document IDs whose indexed field equals value.
@@ -114,6 +149,138 @@ func (idx *Index) Find(value interface{}) []string {
 	return out
 }
 
+// FindRange returns IDs whose numeric or string field value falls in the range.
+// Pass nil for an open bound.
+func (idx *Index) FindRange(lo, hi interface{}, loIncl, hiIncl bool) []string {
+	if lo != nil {
+		if _, ok := toFloat64(lo); ok {
+			return idx.findNumRange(lo, hi, loIncl, hiIncl)
+		}
+		if _, ok := lo.(string); ok {
+			return idx.findStrRange(lo, hi, loIncl, hiIncl)
+		}
+	}
+	if hi != nil {
+		if _, ok := toFloat64(hi); ok {
+			return idx.findNumRange(lo, hi, loIncl, hiIncl)
+		}
+		if _, ok := hi.(string); ok {
+			return idx.findStrRange(lo, hi, loIncl, hiIncl)
+		}
+	}
+	return nil
+}
+
+func (idx *Index) findNumRange(lo, hi interface{}, loIncl, hiIncl bool) []string {
+	var out []string
+	for _, b := range idx.nums {
+		if lo != nil {
+			ln, _ := toFloat64(lo)
+			if loIncl {
+				if b.v < ln {
+					continue
+				}
+			} else if b.v <= ln {
+				continue
+			}
+		}
+		if hi != nil {
+			hn, _ := toFloat64(hi)
+			if hiIncl {
+				if b.v > hn {
+					break
+				}
+			} else if b.v >= hn {
+				break
+			}
+		}
+		for id := range b.ids {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+func (idx *Index) findStrRange(lo, hi interface{}, loIncl, hiIncl bool) []string {
+	var loS, hiS string
+	var hasLo, hasHi bool
+	if lo != nil {
+		loS, hasLo = lo.(string)
+	}
+	if hi != nil {
+		hiS, hasHi = hi.(string)
+	}
+	var out []string
+	for _, b := range idx.strs {
+		if hasLo {
+			if loIncl {
+				if b.s < loS {
+					continue
+				}
+			} else if b.s <= loS {
+				continue
+			}
+		}
+		if hasHi {
+			if hiIncl {
+				if b.s > hiS {
+					break
+				}
+			} else if b.s >= hiS {
+				break
+			}
+		}
+		for id := range b.ids {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+func (idx *Index) addNum(v float64, id string) {
+	i := sort.Search(len(idx.nums), func(i int) bool { return idx.nums[i].v >= v })
+	if i < len(idx.nums) && idx.nums[i].v == v {
+		idx.nums[i].ids[id] = struct{}{}
+		return
+	}
+	idx.nums = append(idx.nums, numBucket{})
+	copy(idx.nums[i+1:], idx.nums[i:])
+	idx.nums[i] = numBucket{v: v, ids: map[string]struct{}{id: {}}}
+}
+
+func (idx *Index) delNum(v float64, id string) {
+	i := sort.Search(len(idx.nums), func(i int) bool { return idx.nums[i].v >= v })
+	if i >= len(idx.nums) || idx.nums[i].v != v {
+		return
+	}
+	delete(idx.nums[i].ids, id)
+	if len(idx.nums[i].ids) == 0 {
+		idx.nums = append(idx.nums[:i], idx.nums[i+1:]...)
+	}
+}
+
+func (idx *Index) addStr(s, id string) {
+	i := sort.Search(len(idx.strs), func(i int) bool { return idx.strs[i].s >= s })
+	if i < len(idx.strs) && idx.strs[i].s == s {
+		idx.strs[i].ids[id] = struct{}{}
+		return
+	}
+	idx.strs = append(idx.strs, strBucket{})
+	copy(idx.strs[i+1:], idx.strs[i:])
+	idx.strs[i] = strBucket{s: s, ids: map[string]struct{}{id: {}}}
+}
+
+func (idx *Index) delStr(s, id string) {
+	i := sort.Search(len(idx.strs), func(i int) bool { return idx.strs[i].s >= s })
+	if i >= len(idx.strs) || idx.strs[i].s != s {
+		return
+	}
+	delete(idx.strs[i].ids, id)
+	if len(idx.strs[i].ids) == 0 {
+		idx.strs = append(idx.strs[:i], idx.strs[i+1:]...)
+	}
+}
+
 func docIDString(doc map[string]interface{}) string {
 	v, ok := doc["_id"]
 	if !ok {
@@ -125,9 +292,6 @@ func docIDString(doc map[string]interface{}) string {
 	return fmt.Sprint(v)
 }
 
-// toIndexKey builds a stable canonical key matching historical json.Marshal
-// output for common scalars (so on-disk .idx files stay valid), without
-// allocating a full encoder for bool/number.
 func toIndexKey(v interface{}) string {
 	switch x := v.(type) {
 	case nil:
@@ -161,7 +325,4 @@ func toIndexKey(v interface{}) string {
 	}
 }
 
-// Deprecated alias kept for any external callers; prefer toIndexKey.
-func toString(v interface{}) string {
-	return toIndexKey(v)
-}
+func toString(v interface{}) string { return toIndexKey(v) }

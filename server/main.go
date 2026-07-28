@@ -146,6 +146,7 @@ func main() {
 		rateLimit         float64
 		rateBurst         int
 		allowInsecureOpen bool
+		syncModeFlag      string
 	)
 
 	flag.StringVar(&addr, "addr", "127.0.0.1:8080", "TCP address to listen on (default localhost-only; use 0.0.0.0:port for all interfaces)")
@@ -162,6 +163,7 @@ func main() {
 	flag.Float64Var(&rateLimit, "rate-limit", 200, "Requests per second per IP (token-bucket rate)")
 	flag.IntVar(&rateBurst, "rate-burst", 500, "Maximum burst size per IP")
 	flag.BoolVar(&allowInsecureOpen, "allow-insecure-open", false, "Allow binding a non-loopback address without an API key (dangerous)")
+	flag.StringVar(&syncModeFlag, "sync-mode", "none", "Document durability: none | every_sec | every_write")
 
 	flag.Parse()
 
@@ -192,7 +194,8 @@ func main() {
 		dataDir = filepath.Join(filepath.Dir(execPath), "data")
 	}
 
-	database, err := db.NewDatabase(dataDir)
+	syncMode := db.ParseSyncMode(syncModeFlag)
+	database, err := db.OpenDatabase(dataDir, db.DatabaseOptions{SyncMode: syncMode})
 	if err != nil {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}
@@ -252,7 +255,7 @@ func main() {
 		MaxHeaderBytes:    1 << 20,
 	}
 
-	log.Printf("Starting server on %s (loopback=%v, apiKey=%v)", addr, loopback, apiKey != "")
+	log.Printf("Starting server on %s (loopback=%v, apiKey=%v, syncMode=%s)", addr, loopback, apiKey != "", syncMode)
 	log.Printf("Data directory: %s", dataDir)
 	log.Printf("GOMAXPROCS = %d", runtime.GOMAXPROCS(0))
 

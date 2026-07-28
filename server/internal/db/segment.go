@@ -14,8 +14,31 @@ import (
 
 const MaxSegmentBytes int64 = 64 << 20 // 64 MiB
 
-// appendEncrypted appends a length-prefixed ciphertext record and returns the
-// payload offset/length (not including the 4-byte length header).
+var segReadBufPool = sync.Pool{
+	New: func() interface{} {
+		b := make([]byte, 0, 4096)
+		return &b
+	},
+}
+
+func getSegBuf(n int) *[]byte {
+	bp := segReadBufPool.Get().(*[]byte)
+	if cap(*bp) < n {
+		*bp = make([]byte, n)
+	} else {
+		*bp = (*bp)[:n]
+	}
+	return bp
+}
+
+func putSegBuf(bp *[]byte) {
+	if bp == nil || cap(*bp) > 1<<20 {
+		return
+	}
+	*bp = (*bp)[:0]
+	segReadBufPool.Put(bp)
+}
+
 func appendEncrypted(f *os.File, ciphertext []byte) (offset int64, length uint32, err error) {
 	if len(ciphertext) == 0 {
 		return 0, 0, fmt.Errorf("empty ciphertext")
@@ -52,8 +75,6 @@ func readAtSegment(path string, offset int64, length uint32) ([]byte, error) {
 	return buf, nil
 }
 
-// segReaders caches open read-only FDs for segment files so hot Get/Find paths
-// do not pay os.Open on every document read.
 type segReaders struct {
 	mu    sync.Mutex
 	files map[uint32]*os.File
@@ -72,19 +93,26 @@ func (r *segReaders) readAt(seg uint32, offset int64, length uint32) ([]byte, er
 	if err != nil {
 		return nil, err
 	}
-	buf := make([]byte, length)
+	bp := getSegBuf(int(length))
+	buf := *bp
 	if _, err := f.ReadAt(buf, offset); err != nil {
-		// Stale FD (file replaced by compaction): drop and retry once.
+		putSegBuf(bp)
 		r.drop(seg)
 		f, err = r.open(seg)
 		if err != nil {
 			return nil, err
 		}
+		bp = getSegBuf(int(length))
+		buf = *bp
 		if _, err := f.ReadAt(buf, offset); err != nil {
+			putSegBuf(bp)
 			return nil, err
 		}
 	}
-	return buf, nil
+	out := make([]byte, length)
+	copy(out, buf)
+	putSegBuf(bp)
+	return out, nil
 }
 
 func (r *segReaders) open(seg uint32) (*os.File, error) {

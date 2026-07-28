@@ -26,6 +26,8 @@ first-class SDKs for **Go** and **TypeScript/JavaScript**.
 8. [Go SDK guide](sdk-go.md)
 9. [TypeScript/JavaScript SDK guide](sdk-typescript.md)
 10. [Architecture](architecture.md) — how it all fits together
+11. **[Архитектура (RU)](architecture.ru.md)** — устройство базы простыми словами
+12. **[Производительность (RU)](performance.ru.md)** — что крутить, чтобы было быстро
 
 ## Feature highlights
 

@@ -1,12 +1,18 @@
 package db
 
 import (
+	"bytes"
+	"encoding/gob"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 )
+
+var docIndexMagic = []byte("EDIX")
+
+const docIndexBinVersion byte = 2
 
 // DocLoc locates an encrypted document payload inside a segment file.
 type DocLoc struct {
@@ -17,6 +23,7 @@ type DocLoc struct {
 }
 
 // DocIndex is an encrypted on-disk map of document id → segment location.
+// On disk it prefers a compact binary (gob) layout; older JSON blobs still load.
 type DocIndex struct {
 	path   string
 	encKey []byte
@@ -45,6 +52,27 @@ func loadDocIndex(path string, encKey []byte) (*DocIndex, error) {
 	if err != nil {
 		return nil, err
 	}
+	locs, err := decodeDocIndexBlob(plain)
+	if err != nil {
+		return nil, err
+	}
+	idx.locs = locs
+	return idx, nil
+}
+
+func decodeDocIndexBlob(plain []byte) (map[string]DocLoc, error) {
+	if len(plain) >= 5 && bytes.Equal(plain[:4], docIndexMagic) && plain[4] == docIndexBinVersion {
+		dec := gob.NewDecoder(bytes.NewReader(plain[5:]))
+		var locs map[string]DocLoc
+		if err := dec.Decode(&locs); err != nil {
+			return nil, fmt.Errorf("binary docindex: %w", err)
+		}
+		if locs == nil {
+			locs = make(map[string]DocLoc)
+		}
+		return locs, nil
+	}
+	// Legacy JSON
 	var locs map[string]DocLoc
 	if err := json.Unmarshal(plain, &locs); err != nil {
 		return nil, err
@@ -52,8 +80,17 @@ func loadDocIndex(path string, encKey []byte) (*DocIndex, error) {
 	if locs == nil {
 		locs = make(map[string]DocLoc)
 	}
-	idx.locs = locs
-	return idx, nil
+	return locs, nil
+}
+
+func encodeDocIndexBlob(locs map[string]DocLoc) ([]byte, error) {
+	var body bytes.Buffer
+	body.Write(docIndexMagic)
+	body.WriteByte(docIndexBinVersion)
+	if err := gob.NewEncoder(&body).Encode(locs); err != nil {
+		return nil, err
+	}
+	return body.Bytes(), nil
 }
 
 func (d *DocIndex) Save() error {
@@ -66,7 +103,7 @@ func (d *DocIndex) Save() error {
 	if err := os.MkdirAll(filepath.Dir(d.path), 0755); err != nil {
 		return err
 	}
-	data, err := json.Marshal(d.locs)
+	data, err := encodeDocIndexBlob(d.locs)
 	if err != nil {
 		return err
 	}
@@ -118,6 +155,16 @@ func (d *DocIndex) LiveIDs() []string {
 		}
 	}
 	sort.Strings(ids)
+	return ids
+}
+
+func (d *DocIndex) LiveIDsUnsorted() []string {
+	ids := make([]string, 0, len(d.locs))
+	for id, loc := range d.locs {
+		if !loc.Dead {
+			ids = append(ids, id)
+		}
+	}
 	return ids
 }
 

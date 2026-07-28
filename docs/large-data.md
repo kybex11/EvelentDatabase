@@ -74,14 +74,19 @@ whole collection into RAM. Sorted finds still collect then sort (capped).
 
 ## 3. Indexes
 
-Create a secondary index on fields you filter by equality often:
+Create a secondary index on fields you filter by:
 
 ```
 POST /api/collections/{c}/indexes  { "field": "email" }
 ```
 
-Indexed equality loads only matching IDs (then segment reads). Range / `$in` /
-multi-field filters still scan.
+- **Equality** `{ "email": "…" }` — O(1) hash lookup, then segment reads.
+- **Range** `{ "age": { "$gte": 18, "$lt": 65 } }` — uses sorted index buckets
+  when an index exists on that field.
+- Without an index, Find decrypts every live document.
+
+Also see `-sync-mode` (`none` / `every_sec` / `every_write`) and Russian guides:
+[architecture.ru.md](architecture.ru.md), [performance.ru.md](performance.ru.md).
 
 ## 4. Batch KV operations
 
@@ -93,6 +98,7 @@ document store at hundreds of GB.
 | Setting | Effect |
 |---------|--------|
 | `-gomaxprocs` | Match available cores |
+| `-sync-mode` | `none` / `every_sec` / `every_write` — durability vs write speed |
 | `-http-read-timeout` | Raise for very large request bodies |
 | `-http-write-timeout 0` | Keep `0` for large responses |
 | `MaxBytes` / `MaxItems` | Cap KV memory |

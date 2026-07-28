@@ -1,9 +1,5 @@
 package db
 
-import (
-	"reflect"
-)
-
 func MatchesFilter(doc map[string]interface{}, filter map[string]interface{}) bool {
 	for key, cond := range filter {
 		if condMap, ok := cond.(map[string]interface{}); ok {
@@ -66,8 +62,59 @@ func MatchesFilter(doc map[string]interface{}, filter map[string]interface{}) bo
 	return true
 }
 
+// valuesEqual is a fast path for JSON-decoded scalars; falls back carefully
+// without reflect.DeepEqual for the common cases.
 func valuesEqual(a, b interface{}) bool {
-	return reflect.DeepEqual(a, b)
+	if a == nil || b == nil {
+		return a == b
+	}
+	switch av := a.(type) {
+	case string:
+		bv, ok := b.(string)
+		return ok && av == bv
+	case bool:
+		bv, ok := b.(bool)
+		return ok && av == bv
+	case float64:
+		if bv, ok := toFloat64(b); ok {
+			return av == bv
+		}
+		return false
+	case int:
+		if bv, ok := toFloat64(b); ok {
+			return float64(av) == bv
+		}
+		return false
+	case int64:
+		if bv, ok := toFloat64(b); ok {
+			return float64(av) == bv
+		}
+		return false
+	case []interface{}:
+		bv, ok := b.([]interface{})
+		if !ok || len(av) != len(bv) {
+			return false
+		}
+		for i := range av {
+			if !valuesEqual(av[i], bv[i]) {
+				return false
+			}
+		}
+		return true
+	case map[string]interface{}:
+		bv, ok := b.(map[string]interface{})
+		if !ok || len(av) != len(bv) {
+			return false
+		}
+		for k, v := range av {
+			if !valuesEqual(v, bv[k]) {
+				return false
+			}
+		}
+		return true
+	default:
+		return a == b
+	}
 }
 
 func CompareValues(a, b interface{}) int {
@@ -102,7 +149,11 @@ func toFloat64(v interface{}) (float64, bool) {
 	switch x := v.(type) {
 	case int:
 		return float64(x), true
+	case int32:
+		return float64(x), true
 	case int64:
+		return float64(x), true
+	case float32:
 		return float64(x), true
 	case float64:
 		return x, true

@@ -12,8 +12,9 @@ store, the key/value store, the data types, and the pub/sub bus.
 ## Features
 
 - **Document store** — append-only encrypted segments + id index (built for large
-  on-disk volumes), secondary indexes, rich filters, sorting, pagination, and
-  cursor (`after` / `nextCursor`) scanning.
+  on-disk volumes), secondary indexes (equality **and** range), rich filters,
+  sorting, pagination, cursor scanning, hot doc cache, and automatic compaction.
+- **Durability modes** — `-sync-mode none|every_sec|every_write`.
 - **Redis-like KV store** — `SET/GET/DEL`, per-key TTL, atomic counters,
   `SETNX`, `APPEND`, batch `MSET/MGET/MDEL`, prefix scans, LRU eviction by item
   count or byte size.
@@ -98,6 +99,8 @@ Full docs live in [`docs/`](docs/README.md):
 | [Large volumes](docs/large-data.md) | Segments, cursors, indexes, tuning |
 | [Go SDK](docs/sdk-go.md) / [TS SDK](docs/sdk-typescript.md) | Client guides |
 | [Architecture](docs/architecture.md) | How it all fits together |
+| [Архитектура (RU)](docs/architecture.ru.md) | Устройство базы простыми словами |
+| [Производительность (RU)](docs/performance.ru.md) | Тюнинг скорости и durability |
 
 ---
 
