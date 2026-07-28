@@ -28,6 +28,7 @@ first-class SDKs for **Go** and **TypeScript/JavaScript**.
 10. [Architecture](architecture.md) — how it all fits together
 11. **[Архитектура (RU)](architecture.ru.md)** — устройство базы простыми словами
 12. **[Производительность (RU)](performance.ru.md)** — что крутить, чтобы было быстро
+13. **[Терабайтный масштаб (RU)](scale-tb.ru.md)** — Pebble meta, лимиты, флаги для TB
 
 ## Feature highlights
 

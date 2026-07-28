@@ -35,8 +35,8 @@ func TestBatchedDocIndexFlush(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer coll2.Close()
-	if coll2.docIndex.LiveCount() != n {
-		t.Fatalf("live=%d want %d", coll2.docIndex.LiveCount(), n)
+	if coll2.meta.LiveCount() != n {
+		t.Fatalf("live=%d want %d", coll2.meta.LiveCount(), n)
 	}
 	for _, id := range ids {
 		if _, err := coll2.FindByID(id); err != nil {
@@ -98,6 +98,7 @@ func TestCompactReclaimsSpace(t *testing.T) {
 	if err := coll.Compact(); err != nil {
 		t.Fatal(err)
 	}
+	// Ensure readers/meta released before measuring & cleanup.
 	got, err := coll.FindByID(id)
 	if err != nil {
 		t.Fatal(err)
@@ -111,7 +112,7 @@ func TestCompactReclaimsSpace(t *testing.T) {
 		afterBytes += fileSize(segmentPath(coll.segDir, n))
 	}
 	if afterBytes >= beforeBytes {
-		t.Fatalf("expected smaller segments after compact: before=%d after=%d", beforeBytes, afterBytes)
+		t.Fatalf("expected smaller segments after compact: before=%d after=%d segs=%v", beforeBytes, afterBytes, after)
 	}
 	if err := coll.Close(); err != nil {
 		t.Fatal(err)

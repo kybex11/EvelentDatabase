@@ -101,6 +101,7 @@ Full docs live in [`docs/`](docs/README.md):
 | [Architecture](docs/architecture.md) | How it all fits together |
 | [Архитектура (RU)](docs/architecture.ru.md) | Устройство базы простыми словами |
 | [Производительность (RU)](docs/performance.ru.md) | Тюнинг скорости и durability |
+| [Терабайты (RU)](docs/scale-tb.ru.md) | Pebble meta + сегменты для TB на одном хосте |
 
 ---
 

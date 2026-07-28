@@ -135,4 +135,5 @@ Meta (docindex) всё равно flush'ится фоном ~1с и на shutdow
 | Только equality index | + range `$gt/$gte/$lt/$lte` |
 | Docindex как огромный JSON | Бинарный gob (`EDIX`) |
 
-Подробный гайд по тюнингу: [performance.ru.md](performance.ru.md).
+Подробный гайд по тюнингу: [performance.ru.md](performance.ru.md).  
+Терабайты на одном хосте: [scale-tb.ru.md](scale-tb.ru.md).

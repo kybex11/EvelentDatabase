@@ -106,14 +106,15 @@ Update/Delete оставляют «дыры» в `.seg` файлах. Диск �
 
 ## 6. Что внутри уже оптимизировано
 
-- Batched flush docindex/indexes (~1с)
-- Binary docindex (`EDIX` + gob), JSON legacy читается
-- FD-кэш сегментов + buffer pool на чтение
-- Hot document LRU (clone на выдачу — безопасно мутировать ответ)
-- Reuse AES-GCM
+- **Pebble LSM** для docindex + secondary indexes (метаданные не обязаны влезать в RAM)
+- Batched / WAL-friendly meta writes; сегменты append-only для TB payload
+- Streaming Find / Compact (без `[]id` на всю коллекцию)
+- FD-кэш сегментов + buffer pool + hot document LRU
+- Reuse AES-GCM; range + equality indexes
 - Sharded LRU + striped RMW locks в KV
-- Range secondary indexes
-- Быстрый `valuesEqual` без `reflect.DeepEqual` на скалярах
+- `-sync-mode`, `-meta-cache-mb`
+
+Для терабайтов читай: [scale-tb.ru.md](scale-tb.ru.md).
 
 ---
 

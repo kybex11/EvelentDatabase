@@ -21,6 +21,7 @@ The server is configured through command-line flags and environment variables.
 | `-rate-limit` | `200` | Token-bucket rate: requests per second per IP. |
 | `-rate-burst` | `500` | Token-bucket burst (max tokens accumulated per IP). |
 | `-sync-mode` | `none` | Document segment durability: `none` (fastest), `every_sec` (fsync ~1s), `every_write` (fsync each append). |
+| `-meta-cache-mb` | `256` | Pebble block cache **per collection** in MiB. Raise (512–2048) for large catalogs / TB deployments. |
 
 A bare positional argument is also accepted as the port: `./db.exe 9090` → `127.0.0.1:9090`.
 

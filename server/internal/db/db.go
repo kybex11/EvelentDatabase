@@ -10,13 +10,14 @@ import (
 )
 
 type Database struct {
-	rootDir     string
-	collections map[string]*Collection
-	encKey      []byte
-	kv          *MemStore
-	broker      *Broker
-	syncMode    SyncMode
-	mu          sync.RWMutex
+	rootDir        string
+	collections    map[string]*Collection
+	encKey         []byte
+	kv             *MemStore
+	broker         *Broker
+	syncMode       SyncMode
+	metaCacheBytes int64
+	mu             sync.RWMutex
 }
 
 // MemStoreOptions tunes the embedded in-memory key/value store. The zero value
@@ -31,8 +32,9 @@ type MemStoreOptions struct {
 
 // DatabaseOptions configures both the KV store and document durability.
 type DatabaseOptions struct {
-	KV       MemStoreOptions
-	SyncMode SyncMode
+	KV             MemStoreOptions
+	SyncMode       SyncMode
+	MetaCacheBytes int64 // Pebble block cache per collection; 0 = 256 MiB
 }
 
 func NewDatabase(rootDir string) (*Database, error) {
@@ -55,10 +57,11 @@ func OpenDatabase(rootDir string, opts DatabaseOptions) (*Database, error) {
 		return nil, err
 	}
 	db := &Database{
-		rootDir:     rootDir,
-		collections: make(map[string]*Collection),
-		encKey:      encKey,
-		syncMode:    opts.SyncMode,
+		rootDir:        rootDir,
+		collections:    make(map[string]*Collection),
+		encKey:         encKey,
+		syncMode:       opts.SyncMode,
+		metaCacheBytes: opts.MetaCacheBytes,
 	}
 	kvOpts := opts.KV
 	flushEvery := kvOpts.FlushEvery
@@ -92,7 +95,7 @@ func OpenDatabase(rootDir string, opts DatabaseOptions) (*Database, error) {
 			continue
 		}
 		collDir := filepath.Join(rootDir, e.Name())
-		coll, err := NewCollectionWithSync(e.Name(), collDir, db.encKey, db.syncMode)
+		coll, err := NewCollectionWithOptions(e.Name(), collDir, db.encKey, db.syncMode, db.metaCacheBytes)
 		if err != nil {
 			fmt.Printf("Warning: cannot load collection %s: %v\n", e.Name(), err)
 			continue
@@ -115,7 +118,7 @@ func (db *Database) GetCollection(name string) (*Collection, error) {
 		return coll, nil
 	}
 	collDir := filepath.Join(db.rootDir, name)
-	coll, err := NewCollectionWithSync(name, collDir, db.encKey, db.syncMode)
+	coll, err := NewCollectionWithOptions(name, collDir, db.encKey, db.syncMode, db.metaCacheBytes)
 	if err != nil {
 		return nil, err
 	}

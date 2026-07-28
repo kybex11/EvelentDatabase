@@ -11,10 +11,13 @@ const (
 	DefaultDocCacheItems = 8192
 	DefaultDocCacheBytes = int64(64 << 20) // 64 MiB
 
-	// How often dirty docindex / secondary indexes are flushed to disk.
+	// Pebble block cache per collection (TB-scale metadata).
+	DefaultMetaCacheBytes = int64(256 << 20) // 256 MiB
+
+	// How often dirty segment fsync / compaction checks run.
 	DefaultMetaFlushEvery = time.Second
 
 	// Compact when live payload is less than half of on-disk segment bytes
 	// and total segment size exceeds this threshold.
-	CompactMinSegmentBytes = int64(8 << 20) // 8 MiB
+	CompactMinSegmentBytes = int64(64 << 20) // 64 MiB (more sensible at scale)
 )

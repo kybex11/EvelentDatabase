@@ -279,6 +279,7 @@ func CollectionStatsHandler(w http.ResponseWriter, r *http.Request) {
 		"indexes":     st.Indexes,
 		"syncMode":    st.SyncMode,
 		"docCache":    st.DocCache,
+		"engine":      st.Engine,
 	})
 }
 

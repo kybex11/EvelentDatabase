@@ -11,22 +11,24 @@ import (
 )
 
 type Collection struct {
-	name     string
-	dir      string
-	docsDir  string
-	segDir   string
-	indexes  map[string]*Index
-	encKey   []byte
-	docIndex *DocIndex
-	curSeg   uint32
-	curFile  *os.File
-	curSize  int64
+	name    string
+	dir     string
+	docsDir string
+	segDir  string
+	encKey  []byte
+	meta    *MetaStore
+	curSeg  uint32
+	curFile *os.File
+	curSize int64
 
-	readers      *segReaders
-	docCache     *LRU
-	indexesDirty bool
-	syncMode     SyncMode
-	segDirty     bool
+	readers  *segReaders
+	docCache *LRU
+	syncMode SyncMode
+	segDirty bool
+
+	// indexFields is a RAM mirror of registered secondary indexes (source of
+	// truth is MetaStore); avoids a disk round-trip on every write.
+	indexFields map[string]struct{}
 
 	stopCh  chan struct{}
 	flushWG sync.WaitGroup
@@ -34,7 +36,6 @@ type Collection struct {
 	mu      sync.RWMutex
 }
 
-// SetSyncMode updates the durability policy for segment appends.
 func (c *Collection) SetSyncMode(mode SyncMode) {
 	c.mu.Lock()
 	c.syncMode = mode
@@ -52,6 +53,10 @@ func NewCollection(name, dir string, encKey []byte) (*Collection, error) {
 }
 
 func NewCollectionWithSync(name, dir string, encKey []byte, syncMode SyncMode) (*Collection, error) {
+	return NewCollectionWithOptions(name, dir, encKey, syncMode, DefaultMetaCacheBytes)
+}
+
+func NewCollectionWithOptions(name, dir string, encKey []byte, syncMode SyncMode, metaCacheBytes int64) (*Collection, error) {
 	docsDir := filepath.Join(dir, "docs")
 	segDir := filepath.Join(dir, "segments")
 	indexesDir := filepath.Join(dir, "indexes")
@@ -64,41 +69,35 @@ func NewCollectionWithSync(name, dir string, encKey []byte, syncMode SyncMode) (
 	if err := os.MkdirAll(indexesDir, 0755); err != nil {
 		return nil, err
 	}
-	didx, err := loadDocIndex(docIndexPath(dir), encKey)
+	meta, err := OpenMetaStore(dir, metaCacheBytes)
 	if err != nil {
-		return nil, fmt.Errorf("load docindex: %w", err)
+		return nil, fmt.Errorf("open meta store: %w", err)
+	}
+	if err := meta.MigrateFromLegacy(dir, encKey); err != nil {
+		_ = meta.Close()
+		return nil, fmt.Errorf("migrate legacy meta: %w", err)
+	}
+	fields, _ := meta.ListIndexes()
+	indexFields := make(map[string]struct{}, len(fields))
+	for _, f := range fields {
+		indexFields[f] = struct{}{}
 	}
 	coll := &Collection{
-		name:     name,
-		dir:      dir,
-		docsDir:  docsDir,
-		segDir:   segDir,
-		indexes:  make(map[string]*Index),
-		encKey:   encKey,
-		docIndex: didx,
-		readers:  newSegReaders(segDir),
-		docCache: NewLRU(DefaultDocCacheItems, DefaultDocCacheBytes),
-		syncMode: syncMode,
-		stopCh:   make(chan struct{}),
+		name:        name,
+		dir:         dir,
+		docsDir:     docsDir,
+		segDir:      segDir,
+		encKey:      encKey,
+		meta:        meta,
+		readers:     newSegReaders(segDir),
+		docCache:    NewLRU(DefaultDocCacheItems, DefaultDocCacheBytes),
+		syncMode:    syncMode,
+		indexFields: indexFields,
+		stopCh:      make(chan struct{}),
 	}
 	if err := coll.openLatestSegment(); err != nil {
+		_ = meta.Close()
 		return nil, err
-	}
-	entries, err := os.ReadDir(indexesDir)
-	if err != nil {
-		return nil, err
-	}
-	for _, e := range entries {
-		if !e.IsDir() && filepath.Ext(e.Name()) == ".idx" {
-			idxPath := filepath.Join(indexesDir, e.Name())
-			idx, err := LoadIndex(idxPath, encKey)
-			if err != nil {
-				fmt.Printf("Warning: cannot load index %s: %v\n", e.Name(), err)
-				continue
-			}
-			idx.field = trimIdxFieldName(e.Name())
-			coll.indexes[idx.field] = idx
-		}
 	}
 	coll.flushWG.Add(1)
 	go coll.metaFlushLoop(DefaultMetaFlushEvery)
@@ -170,10 +169,6 @@ func (c *Collection) appendDocLocked(ciphertext []byte) (DocLoc, error) {
 	return DocLoc{Seg: c.curSeg, Offset: off, Length: length}, nil
 }
 
-func (c *Collection) markIndexesDirty() {
-	c.indexesDirty = true
-}
-
 func (c *Collection) metaFlushLoop(every time.Duration) {
 	defer c.flushWG.Done()
 	t := time.NewTicker(every)
@@ -189,9 +184,11 @@ func (c *Collection) metaFlushLoop(every time.Duration) {
 				_ = c.curFile.Sync()
 				c.segDirty = false
 			}
-			_ = c.flushMetaLocked()
+			if c.meta != nil && c.syncMode != SyncNone {
+				_ = c.meta.Flush()
+			}
 			compactTick++
-			if compactTick >= 30 { // ~every 30s
+			if compactTick >= 30 {
 				compactTick = 0
 				_ = c.maybeCompactLocked()
 			}
@@ -218,6 +215,10 @@ func (c *Collection) Drop() error {
 	if c.readers != nil {
 		c.readers.closeAll()
 	}
+	if c.meta != nil {
+		_ = c.meta.Close()
+		c.meta = nil
+	}
 	return os.RemoveAll(c.dir)
 }
 
@@ -236,36 +237,27 @@ func (c *Collection) Close() error {
 		_ = c.curFile.Sync()
 		c.segDirty = false
 	}
-	if err := c.flushMetaLocked(); err != nil {
-		return err
+	if c.meta != nil {
+		_ = c.meta.Flush()
 	}
 	if c.readers != nil {
 		c.readers.closeAll()
 	}
+	var first error
 	if c.curFile != nil {
 		_ = c.curFile.Sync()
-		err := c.curFile.Close()
-		c.curFile = nil
-		return err
-	}
-	return nil
-}
-
-func (c *Collection) flushMetaLocked() error {
-	if err := c.docIndex.Save(); err != nil {
-		return err
-	}
-	if !c.indexesDirty {
-		return nil
-	}
-	for field, idx := range c.indexes {
-		idxPath := filepath.Join(c.dir, "indexes", field+".idx")
-		if err := idx.Save(idxPath, c.encKey); err != nil {
-			return err
+		if err := c.curFile.Close(); err != nil {
+			first = err
 		}
+		c.curFile = nil
 	}
-	c.indexesDirty = false
-	return nil
+	if c.meta != nil {
+		if err := c.meta.Close(); err != nil && first == nil {
+			first = err
+		}
+		c.meta = nil
+	}
+	return first
 }
 
 func (c *Collection) cachePut(id string, doc map[string]interface{}) {
@@ -305,7 +297,6 @@ func cloneDoc(doc map[string]interface{}) map[string]interface{} {
 }
 
 func approxDocBytes(id string, doc map[string]interface{}) int64 {
-	// Cheap estimate: key + rough field overhead. Exact size is not required.
 	n := int64(len(id) + 64)
 	for k, v := range doc {
 		n += int64(len(k) + 16)
@@ -321,6 +312,24 @@ func approxDocBytes(id string, doc map[string]interface{}) int64 {
 	return n
 }
 
+func (c *Collection) indexDocLocked(doc map[string]interface{}) {
+	id := docIDString(doc)
+	for field := range c.indexFields {
+		if val, ok := doc[field]; ok {
+			_ = c.meta.IndexInsert(field, id, val)
+		}
+	}
+}
+
+func (c *Collection) unindexDocLocked(doc map[string]interface{}) {
+	id := docIDString(doc)
+	for field := range c.indexFields {
+		if val, ok := doc[field]; ok {
+			_ = c.meta.IndexDelete(field, id, val)
+		}
+	}
+}
+
 func (c *Collection) Insert(doc map[string]interface{}) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -330,10 +339,9 @@ func (c *Collection) Insert(doc map[string]interface{}) (string, error) {
 		id = generateID()
 		doc["_id"] = id
 	}
-	if c.docIndex.Has(id) {
+	if c.meta.Has(id) {
 		return "", fmt.Errorf("document already exists")
 	}
-	// Legacy file collision
 	if _, err := os.Stat(c.resolveDocPath(id)); err == nil {
 		return "", fmt.Errorf("document already exists")
 	}
@@ -346,11 +354,10 @@ func (c *Collection) Insert(doc map[string]interface{}) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	c.docIndex.Put(id, loc)
-	for _, idx := range c.indexes {
-		idx.Insert(doc)
+	if err := c.meta.PutLoc(id, loc); err != nil {
+		return "", err
 	}
-	c.markIndexesDirty()
+	c.indexDocLocked(doc)
 	c.cachePut(id, doc)
 	return id, nil
 }
@@ -376,15 +383,12 @@ func (c *Collection) InsertMany(docs []map[string]interface{}) ([]string, error)
 		if err != nil {
 			return nil, err
 		}
-		c.docIndex.Put(id, loc)
-		for _, idx := range c.indexes {
-			idx.Insert(doc)
+		if err := c.meta.PutLoc(id, loc); err != nil {
+			return nil, err
 		}
+		c.indexDocLocked(doc)
 		c.cachePut(id, doc)
 		ids = append(ids, id)
-	}
-	if len(ids) > 0 {
-		c.markIndexesDirty()
 	}
 	return ids, nil
 }
@@ -399,7 +403,6 @@ func (c *Collection) FindByID(id string) (map[string]interface{}, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Upgrade to write briefly to populate cache? Skip — Set on LRU has its own lock.
 	c.cachePut(id, doc)
 	return doc, nil
 }
@@ -421,14 +424,12 @@ func (c *Collection) Update(id string, update map[string]interface{}) error {
 	if err != nil {
 		return err
 	}
-	c.docIndex.Put(id, loc)
-	// Remove legacy file if present (lazy migrate).
-	_ = c.removeLegacyFile(id)
-	for _, idx := range c.indexes {
-		idx.Delete(oldDoc)
-		idx.Insert(update)
+	if err := c.meta.PutLoc(id, loc); err != nil {
+		return err
 	}
-	c.markIndexesDirty()
+	_ = c.removeLegacyFile(id)
+	c.unindexDocLocked(oldDoc)
+	c.indexDocLocked(update)
 	c.cachePut(id, update)
 	return nil
 }
@@ -441,12 +442,11 @@ func (c *Collection) Delete(id string) error {
 	if err != nil {
 		return err
 	}
-	c.docIndex.Delete(id)
-	_ = c.removeLegacyFile(id)
-	for _, idx := range c.indexes {
-		idx.Delete(doc)
+	if err := c.meta.DeleteLoc(id); err != nil {
+		return err
 	}
-	c.markIndexesDirty()
+	_ = c.removeLegacyFile(id)
+	c.unindexDocLocked(doc)
 	c.cacheInvalidate(id)
 	return nil
 }
@@ -477,61 +477,61 @@ func (c *Collection) Find(filter map[string]interface{}, opts *FindOptions) ([]m
 	}
 
 	var results []map[string]interface{}
-
-	// Fast path: indexed equality.
-	if field, value, ok := EqualityIndexFilter(filter); ok {
-		if idx, has := c.indexes[field]; has {
-			ids := append([]string(nil), idx.Find(value)...)
-			sort.Strings(ids)
-			for _, id := range ids {
-				if opts.AfterID != "" && id <= opts.AfterID {
-					continue
-				}
-				doc, err := c.readDocCached(id)
-				if err != nil {
-					continue
-				}
-				results = append(results, doc)
-			}
-			return c.finalizeFind(results, opts), nil
-		}
-	}
-
-	// Fast path: indexed range ($gt/$gte/$lt/$lte on one field).
-	if spec, ok := RangeIndexFilter(filter); ok {
-		if idx, has := c.indexes[spec.Field]; has {
-			ids := append([]string(nil), idx.FindRange(spec.Lo, spec.Hi, spec.LoIncl, spec.HiIncl)...)
-			sort.Strings(ids)
-			for _, id := range ids {
-				if opts.AfterID != "" && id <= opts.AfterID {
-					continue
-				}
-				doc, err := c.readDocCached(id)
-				if err != nil {
-					continue
-				}
-				results = append(results, doc)
-			}
-			return c.finalizeFind(results, opts), nil
-		}
-	}
-
-	// Streaming scan: segment index + legacy files, ordered by id when unsorted.
 	needSort := opts.SortField != ""
-	after := opts.AfterID
+	limitHit := func() bool {
+		if needSort {
+			return len(results) >= MaxSortCollect
+		}
+		return opts.Skip == 0 && opts.Limit >= 0 && len(results) >= opts.Limit
+	}
 
-	err := c.forEachDocumentLocked(func(id string, doc map[string]interface{}) error {
-		if after != "" && id <= after {
+	// Fast path: indexed equality (streaming — no giant []string).
+	if field, value, ok := EqualityIndexFilter(filter); ok {
+		if _, has := c.indexFields[field]; has {
+			err := c.meta.IndexFindEq(field, value, func(id string) error {
+				if opts.AfterID != "" && id <= opts.AfterID {
+					return nil
+				}
+				doc, err := c.readDocCached(id)
+				if err != nil {
+					return nil
+				}
+				results = append(results, doc)
+				if limitHit() {
+					return errFindLimitReached
+				}
+				return nil
+			})
+			if err != nil && err != errFindLimitReached {
+				return nil, err
+			}
+			return c.finalizeFind(results, opts), nil
+		}
+	}
+
+	// Fast path: indexed range.
+	if spec, ok := RangeIndexFilter(filter); ok {
+		if _, has := c.indexFields[spec.Field]; has {
+			err := c.streamRange(spec, opts, &results, limitHit)
+			if err != nil && err != errFindLimitReached {
+				return nil, err
+			}
+			return c.finalizeFind(results, opts), nil
+		}
+	}
+
+	// Full scan via Pebble iterator (does NOT load all IDs into RAM).
+	after := opts.AfterID
+	err := c.meta.ForEachDocAfter(after, func(id string, _ DocLoc) error {
+		doc, err := c.readDocCached(id)
+		if err != nil {
 			return nil
 		}
 		if !MatchesFilter(doc, filter) {
 			return nil
 		}
 		results = append(results, doc)
-		if !needSort && opts.Skip == 0 && opts.Limit >= 0 && len(results) >= opts.Limit {
-			return errFindLimitReached
-		}
-		if needSort && len(results) >= MaxSortCollect {
+		if limitHit() {
 			return errFindLimitReached
 		}
 		return nil
@@ -540,10 +540,73 @@ func (c *Collection) Find(filter map[string]interface{}, opts *FindOptions) ([]m
 		return nil, err
 	}
 
+	// Legacy files not in meta (rare after migration).
+	_ = c.walkLegacyDocFiles(func(path string) error {
+		id := legacyIDFromPath(path)
+		if c.meta.Has(id) {
+			return nil
+		}
+		if after != "" && id <= after {
+			return nil
+		}
+		doc, err := c.readDocByID(id)
+		if err != nil {
+			return nil
+		}
+		if !MatchesFilter(doc, filter) {
+			return nil
+		}
+		results = append(results, doc)
+		if limitHit() {
+			return errFindLimitReached
+		}
+		return nil
+	})
+
 	return c.finalizeFind(results, opts), nil
 }
 
-// FindPage is like Find but also returns a nextCursor for keyset pagination.
+func (c *Collection) streamRange(spec RangeSpec, opts *FindOptions, results *[]map[string]interface{}, limitHit func() bool) error {
+	add := func(id string) error {
+		if opts.AfterID != "" && id <= opts.AfterID {
+			return nil
+		}
+		doc, err := c.readDocCached(id)
+		if err != nil {
+			return nil
+		}
+		*results = append(*results, doc)
+		if limitHit() {
+			return errFindLimitReached
+		}
+		return nil
+	}
+
+	var loF, hiF *float64
+	var loS, hiS *string
+	if spec.Lo != nil {
+		if n, ok := toFloat64(spec.Lo); ok {
+			loF = &n
+		} else if s, ok := spec.Lo.(string); ok {
+			loS = &s
+		}
+	}
+	if spec.Hi != nil {
+		if n, ok := toFloat64(spec.Hi); ok {
+			hiF = &n
+		} else if s, ok := spec.Hi.(string); ok {
+			hiS = &s
+		}
+	}
+	if loF != nil || hiF != nil || (spec.Lo == nil && spec.Hi == nil) {
+		// Prefer numeric path when either bound is numeric.
+		if loS == nil && hiS == nil {
+			return c.meta.IndexFindRangeNum(spec.Field, loF, hiF, spec.LoIncl, spec.HiIncl, add)
+		}
+	}
+	return c.meta.IndexFindRangeStr(spec.Field, loS, hiS, spec.LoIncl, spec.HiIncl, add)
+}
+
 func (c *Collection) FindPage(filter map[string]interface{}, opts *FindOptions) (docs []map[string]interface{}, nextCursor string, err error) {
 	docs, err = c.Find(filter, opts)
 	if err != nil {
@@ -559,7 +622,6 @@ func (c *Collection) FindPage(filter map[string]interface{}, opts *FindOptions) 
 	if id, ok := last["_id"].(string); ok && id != "" && opts.SortField == "" {
 		return docs, EncodeCursorAfter(id), nil
 	}
-	// Fall back to skip-based cursor when sorted.
 	nextSkip := opts.Skip + len(docs)
 	return docs, EncodeCursorSkip(nextSkip), nil
 }
@@ -567,35 +629,27 @@ func (c *Collection) FindPage(filter map[string]interface{}, opts *FindOptions) 
 var errFindLimitReached = fmt.Errorf("find limit reached")
 
 func (c *Collection) forEachDocumentLocked(fn func(id string, doc map[string]interface{}) error) error {
-	ids := make([]string, 0, len(c.docIndex.locs)+64)
-	seen := make(map[string]struct{})
-
-	for _, id := range c.docIndex.LiveIDs() {
-		ids = append(ids, id)
-		seen[id] = struct{}{}
-	}
-
-	_ = c.walkLegacyDocFiles(func(path string) error {
-		id := legacyIDFromPath(path)
-		if _, ok := seen[id]; ok {
-			return nil
-		}
-		seen[id] = struct{}{}
-		ids = append(ids, id)
-		return nil
-	})
-	sort.Strings(ids)
-
-	for _, id := range ids {
+	err := c.meta.ForEachDoc(func(id string, _ DocLoc) error {
 		doc, err := c.readDocCached(id)
 		if err != nil {
-			continue
+			return nil
 		}
-		if err := fn(id, doc); err != nil {
-			return err
-		}
+		return fn(id, doc)
+	})
+	if err != nil {
+		return err
 	}
-	return nil
+	return c.walkLegacyDocFiles(func(path string) error {
+		id := legacyIDFromPath(path)
+		if c.meta.Has(id) {
+			return nil
+		}
+		doc, err := c.readDocByID(id)
+		if err != nil {
+			return nil
+		}
+		return fn(id, doc)
+	})
 }
 
 func (c *Collection) readDocCached(id string) (map[string]interface{}, error) {
@@ -630,7 +684,7 @@ func (c *Collection) readDocByID(id string) (map[string]interface{}, error) {
 }
 
 func (c *Collection) readSegDoc(id string) (map[string]interface{}, error) {
-	loc, ok := c.docIndex.Get(id)
+	loc, ok := c.meta.GetLoc(id)
 	if !ok {
 		return nil, fmt.Errorf("document not found")
 	}
@@ -656,16 +710,13 @@ func (c *Collection) finalizeFind(results []map[string]interface{}, opts *FindOp
 		field := opts.SortField
 		desc := opts.SortDesc
 		sort.SliceStable(results, func(i, j int) bool {
-			vi := results[i][field]
-			vj := results[j][field]
-			cmp := CompareValues(vi, vj)
+			cmp := CompareValues(results[i][field], results[j][field])
 			if desc {
 				return cmp > 0
 			}
 			return cmp < 0
 		})
 	}
-
 	if opts.Skip > 0 {
 		if opts.Skip >= len(results) {
 			results = []map[string]interface{}{}
@@ -676,21 +727,20 @@ func (c *Collection) finalizeFind(results []map[string]interface{}, opts *FindOp
 	if opts.Limit >= 0 && len(results) > opts.Limit {
 		results = results[:opts.Limit]
 	}
-
 	if results == nil {
 		results = []map[string]interface{}{}
 	}
 	return results
 }
 
-// CollectionStats is a richer snapshot for observability endpoints.
 type CollectionStats struct {
-	Docs      int64    `json:"docs"`
-	Bytes     int64    `json:"bytes"`
-	Segments  int      `json:"segments"`
-	Indexes   []string `json:"indexes"`
-	SyncMode  string   `json:"syncMode"`
-	DocCache  LRUStats `json:"docCache"`
+	Docs     int64    `json:"docs"`
+	Bytes    int64    `json:"bytes"`
+	Segments int      `json:"segments"`
+	Indexes  []string `json:"indexes"`
+	SyncMode string   `json:"syncMode"`
+	DocCache LRUStats `json:"docCache"`
+	Engine   string   `json:"engine"`
 }
 
 func (c *Collection) Stats() (docCount int64, totalBytes int64, err error) {
@@ -703,25 +753,25 @@ func (c *Collection) StatsDetailed() (CollectionStats, error) {
 	defer c.mu.RUnlock()
 
 	st := CollectionStats{
-		Docs:     c.docIndex.LiveCount(),
-		Bytes:    c.docIndex.ApproximateBytes(),
+		Docs:     c.meta.LiveCount(),
+		Bytes:    c.meta.LiveBytes(),
 		SyncMode: c.syncMode.String(),
-		Indexes:  make([]string, 0, len(c.indexes)),
+		Indexes:  make([]string, 0, len(c.indexFields)),
+		Engine:   "pebble+segments",
 	}
 	if c.docCache != nil {
 		st.DocCache = c.docCache.Stats()
 	}
-	for f := range c.indexes {
+	for f := range c.indexFields {
 		st.Indexes = append(st.Indexes, f)
 	}
 	sort.Strings(st.Indexes)
 	if nums, err := listSegmentNumbers(c.segDir); err == nil {
 		st.Segments = len(nums)
 	}
-
 	err := c.walkLegacyDocFiles(func(path string) error {
 		id := legacyIDFromPath(path)
-		if c.docIndex.Has(id) {
+		if c.meta.Has(id) {
 			return nil
 		}
 		info, err := os.Stat(path)
@@ -738,8 +788,8 @@ func (c *Collection) StatsDetailed() (CollectionStats, error) {
 func (c *Collection) ListIndexes() []string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	out := make([]string, 0, len(c.indexes))
-	for f := range c.indexes {
+	out := make([]string, 0, len(c.indexFields))
+	for f := range c.indexFields {
 		out = append(out, f)
 	}
 	sort.Strings(out)
@@ -750,44 +800,44 @@ func (c *Collection) CreateIndex(field string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if _, ok := c.indexes[field]; ok {
+	if _, ok := c.indexFields[field]; ok {
 		return nil
 	}
-	idx := NewIndex(field)
+	if err := c.meta.RegisterIndex(field); err != nil {
+		return err
+	}
+	// Backfill from existing docs (streaming).
 	err := c.forEachDocumentLocked(func(_ string, doc map[string]interface{}) error {
-		idx.Insert(doc)
+		id := docIDString(doc)
+		if val, ok := doc[field]; ok {
+			return c.meta.IndexInsert(field, id, val)
+		}
 		return nil
 	})
 	if err != nil {
 		return err
 	}
-	c.indexes[field] = idx
-	idxPath := filepath.Join(c.dir, "indexes", field+".idx")
-	if err := idx.Save(idxPath, c.encKey); err != nil {
-		return err
-	}
+	c.indexFields[field] = struct{}{}
 	return nil
 }
 
 func (c *Collection) DropIndex(field string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
-	if _, ok := c.indexes[field]; !ok {
+	if _, ok := c.indexFields[field]; !ok {
 		return fmt.Errorf("index not found")
 	}
-	delete(c.indexes, field)
-	idxPath := filepath.Join(c.dir, "indexes", field+".idx")
-	return os.Remove(idxPath)
+	if err := c.meta.UnregisterIndex(field); err != nil {
+		return err
+	}
+	delete(c.indexFields, field)
+	return nil
 }
 
 func trimIdxFieldName(idxFileName string) string {
 	return strings.TrimSuffix(idxFileName, ".idx")
 }
 
-// Compact rewrites all live documents into fresh segment files and drops
-// orphaned payloads left by updates/deletes. Safe to call concurrently with
-// the meta flusher (takes the write lock).
 func (c *Collection) Compact() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -795,7 +845,7 @@ func (c *Collection) Compact() error {
 }
 
 func (c *Collection) maybeCompactLocked() error {
-	live := c.docIndex.ApproximateBytes()
+	live := c.meta.LiveBytes()
 	nums, err := listSegmentNumbers(c.segDir)
 	if err != nil || len(nums) == 0 {
 		return err
@@ -810,44 +860,9 @@ func (c *Collection) maybeCompactLocked() error {
 	return c.compactLocked()
 }
 
+// compactLocked rewrites live payloads into new segments without holding all
+// documents in RAM — streams id→doc→append one at a time.
 func (c *Collection) compactLocked() error {
-	ids := c.docIndex.LiveIDs()
-	if len(ids) == 0 {
-		// Drop empty segments except keep a fresh writable one.
-		oldNums, _ := listSegmentNumbers(c.segDir)
-		if c.curFile != nil {
-			_ = c.curFile.Close()
-			c.curFile = nil
-		}
-		c.readers.closeAll()
-		for _, n := range oldNums {
-			_ = os.Remove(segmentPath(c.segDir, n))
-		}
-		c.curSeg = 1
-		f, err := openAppend(segmentPath(c.segDir, c.curSeg))
-		if err != nil {
-			return err
-		}
-		c.curFile = f
-		c.curSize = 0
-		c.docIndex.dirty = true
-		return c.docIndex.Save()
-	}
-
-	// Read all live docs first (from old segments / cache / legacy).
-	type liveDoc struct {
-		id  string
-		doc map[string]interface{}
-	}
-	lives := make([]liveDoc, 0, len(ids))
-	for _, id := range ids {
-		doc, err := c.readDocByID(id)
-		if err != nil {
-			continue
-		}
-		lives = append(lives, liveDoc{id: id, doc: doc})
-	}
-
 	oldNums, err := listSegmentNumbers(c.segDir)
 	if err != nil {
 		return err
@@ -859,7 +874,6 @@ func (c *Collection) compactLocked() error {
 	}
 	c.readers.closeAll()
 
-	// Start writing into a new segment number past the old ones.
 	var next uint32 = 1
 	for _, n := range oldNums {
 		if n >= next {
@@ -874,9 +888,14 @@ func (c *Collection) compactLocked() error {
 	c.curFile = f
 	c.curSize = 0
 
-	newIndex := newDocIndex(c.docIndex.path, c.encKey)
-	for _, ld := range lives {
-		data, err := encodeDocument(c.encKey, ld.doc)
+	writtenSegs := map[uint32]struct{}{c.curSeg: {}}
+	var liveN int
+	err = c.meta.ForEachDoc(func(id string, _ DocLoc) error {
+		doc, err := c.readDocByID(id)
+		if err != nil {
+			return nil
+		}
+		data, err := encodeDocument(c.encKey, doc)
 		if err != nil {
 			return err
 		}
@@ -884,32 +903,35 @@ func (c *Collection) compactLocked() error {
 		if err != nil {
 			return err
 		}
-		newIndex.Put(ld.id, loc)
-		c.cachePut(ld.id, ld.doc)
-	}
-	newIndex.dirty = true
-	c.docIndex = newIndex
-	if err := c.docIndex.Save(); err != nil {
-		return err
-	}
-	if err := c.curFile.Sync(); err != nil {
+		if err := c.meta.PutLoc(id, loc); err != nil {
+			return err
+		}
+		writtenSegs[loc.Seg] = struct{}{}
+		c.cachePut(id, doc)
+		liveN++
+		return nil
+	})
+	if err != nil {
 		return err
 	}
 
-	// Remove old segment files (not the ones we just wrote).
-	written := make(map[uint32]struct{})
-	for _, loc := range c.docIndex.locs {
-		if !loc.Dead {
-			written[loc.Seg] = struct{}{}
-		}
+	if c.curFile != nil {
+		_ = c.curFile.Sync()
 	}
-	written[c.curSeg] = struct{}{}
+	_ = c.meta.Flush()
+
+	// Drop any FDs re-opened during the rewrite so Windows can unlink.
+	c.readers.closeAll()
+
 	for _, n := range oldNums {
-		if _, keep := written[n]; keep {
+		if _, keep := writtenSegs[n]; keep {
 			continue
 		}
 		_ = os.Remove(segmentPath(c.segDir, n))
 		c.readers.drop(n)
+	}
+	if liveN == 0 && c.curFile != nil {
+		// keep empty writable segment
 	}
 	return nil
 }
