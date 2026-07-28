@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 type Collection struct {
@@ -20,6 +21,14 @@ type Collection struct {
 	curSeg   uint32
 	curFile  *os.File
 	curSize  int64
+
+	readers      *segReaders
+	docCache     *LRU
+	indexesDirty bool
+
+	stopCh   chan struct{}
+	flushWG  sync.WaitGroup
+	stopped  bool
 	mu       sync.RWMutex
 }
 
@@ -48,6 +57,9 @@ func NewCollection(name, dir string, encKey []byte) (*Collection, error) {
 		indexes:  make(map[string]*Index),
 		encKey:   encKey,
 		docIndex: didx,
+		readers:  newSegReaders(segDir),
+		docCache: NewLRU(DefaultDocCacheItems, DefaultDocCacheBytes),
+		stopCh:   make(chan struct{}),
 	}
 	if err := coll.openLatestSegment(); err != nil {
 		return nil, err
@@ -68,6 +80,8 @@ func NewCollection(name, dir string, encKey []byte) (*Collection, error) {
 			coll.indexes[idx.field] = idx
 		}
 	}
+	coll.flushWG.Add(1)
+	go coll.metaFlushLoop(DefaultMetaFlushEvery)
 	return coll, nil
 }
 
@@ -130,21 +144,69 @@ func (c *Collection) appendDocLocked(ciphertext []byte) (DocLoc, error) {
 	return DocLoc{Seg: c.curSeg, Offset: off, Length: length}, nil
 }
 
+func (c *Collection) markIndexesDirty() {
+	c.indexesDirty = true
+}
+
+func (c *Collection) metaFlushLoop(every time.Duration) {
+	defer c.flushWG.Done()
+	t := time.NewTicker(every)
+	defer t.Stop()
+	compactTick := 0
+	for {
+		select {
+		case <-c.stopCh:
+			return
+		case <-t.C:
+			c.mu.Lock()
+			_ = c.flushMetaLocked()
+			compactTick++
+			if compactTick >= 30 { // ~every 30s
+				compactTick = 0
+				_ = c.maybeCompactLocked()
+			}
+			c.mu.Unlock()
+		}
+	}
+}
+
 func (c *Collection) Drop() error {
+	c.mu.Lock()
+	if !c.stopped {
+		c.stopped = true
+		close(c.stopCh)
+	}
+	c.mu.Unlock()
+	c.flushWG.Wait()
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.curFile != nil {
 		_ = c.curFile.Close()
 		c.curFile = nil
 	}
+	if c.readers != nil {
+		c.readers.closeAll()
+	}
 	return os.RemoveAll(c.dir)
 }
 
 func (c *Collection) Close() error {
 	c.mu.Lock()
+	if !c.stopped {
+		c.stopped = true
+		close(c.stopCh)
+	}
+	c.mu.Unlock()
+	c.flushWG.Wait()
+
+	c.mu.Lock()
 	defer c.mu.Unlock()
 	if err := c.flushMetaLocked(); err != nil {
 		return err
+	}
+	if c.readers != nil {
+		c.readers.closeAll()
 	}
 	if c.curFile != nil {
 		_ = c.curFile.Sync()
@@ -159,13 +221,70 @@ func (c *Collection) flushMetaLocked() error {
 	if err := c.docIndex.Save(); err != nil {
 		return err
 	}
+	if !c.indexesDirty {
+		return nil
+	}
 	for field, idx := range c.indexes {
 		idxPath := filepath.Join(c.dir, "indexes", field+".idx")
 		if err := idx.Save(idxPath, c.encKey); err != nil {
 			return err
 		}
 	}
+	c.indexesDirty = false
 	return nil
+}
+
+func (c *Collection) cachePut(id string, doc map[string]interface{}) {
+	if c.docCache == nil || id == "" || doc == nil {
+		return
+	}
+	c.docCache.Set(id, cloneDoc(doc), 0, approxDocBytes(id, doc))
+}
+
+func (c *Collection) cacheGet(id string) (map[string]interface{}, bool) {
+	if c.docCache == nil {
+		return nil, false
+	}
+	raw, ok := c.docCache.Get(id)
+	if !ok {
+		return nil, false
+	}
+	doc, ok := raw.(map[string]interface{})
+	if !ok {
+		return nil, false
+	}
+	return cloneDoc(doc), true
+}
+
+func (c *Collection) cacheInvalidate(id string) {
+	if c.docCache != nil {
+		c.docCache.Delete(id)
+	}
+}
+
+func cloneDoc(doc map[string]interface{}) map[string]interface{} {
+	out := make(map[string]interface{}, len(doc))
+	for k, v := range doc {
+		out[k] = v
+	}
+	return out
+}
+
+func approxDocBytes(id string, doc map[string]interface{}) int64 {
+	// Cheap estimate: key + rough field overhead. Exact size is not required.
+	n := int64(len(id) + 64)
+	for k, v := range doc {
+		n += int64(len(k) + 16)
+		switch x := v.(type) {
+		case string:
+			n += int64(len(x))
+		case []byte:
+			n += int64(len(x))
+		default:
+			n += 24
+		}
+	}
+	return n
 }
 
 func (c *Collection) Insert(doc map[string]interface{}) (string, error) {
@@ -197,7 +316,8 @@ func (c *Collection) Insert(doc map[string]interface{}) (string, error) {
 	for _, idx := range c.indexes {
 		idx.Insert(doc)
 	}
-	_ = c.docIndex.Save()
+	c.markIndexesDirty()
+	c.cachePut(id, doc)
 	return id, nil
 }
 
@@ -226,19 +346,27 @@ func (c *Collection) InsertMany(docs []map[string]interface{}) ([]string, error)
 		for _, idx := range c.indexes {
 			idx.Insert(doc)
 		}
+		c.cachePut(id, doc)
 		ids = append(ids, id)
 	}
-	_ = c.docIndex.Save()
+	if len(ids) > 0 {
+		c.markIndexesDirty()
+	}
 	return ids, nil
 }
 
 func (c *Collection) FindByID(id string) (map[string]interface{}, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	if doc, ok := c.cacheGet(id); ok {
+		return doc, nil
+	}
 	doc, err := c.readDocByID(id)
 	if err != nil {
 		return nil, err
 	}
+	// Upgrade to write briefly to populate cache? Skip — Set on LRU has its own lock.
+	c.cachePut(id, doc)
 	return doc, nil
 }
 
@@ -266,7 +394,9 @@ func (c *Collection) Update(id string, update map[string]interface{}) error {
 		idx.Delete(oldDoc)
 		idx.Insert(update)
 	}
-	return c.docIndex.Save()
+	c.markIndexesDirty()
+	c.cachePut(id, update)
+	return nil
 }
 
 func (c *Collection) Delete(id string) error {
@@ -282,7 +412,9 @@ func (c *Collection) Delete(id string) error {
 	for _, idx := range c.indexes {
 		idx.Delete(doc)
 	}
-	return c.docIndex.Save()
+	c.markIndexesDirty()
+	c.cacheInvalidate(id)
+	return nil
 }
 
 func (c *Collection) removeLegacyFile(id string) error {
@@ -321,7 +453,7 @@ func (c *Collection) Find(filter map[string]interface{}, opts *FindOptions) ([]m
 				if opts.AfterID != "" && id <= opts.AfterID {
 					continue
 				}
-				doc, err := c.readDocByID(id)
+				doc, err := c.readDocCached(id)
 				if err != nil {
 					continue
 				}
@@ -402,7 +534,7 @@ func (c *Collection) forEachDocumentLocked(fn func(id string, doc map[string]int
 	sort.Strings(ids)
 
 	for _, id := range ids {
-		doc, err := c.readDocByID(id)
+		doc, err := c.readDocCached(id)
 		if err != nil {
 			continue
 		}
@@ -411,6 +543,18 @@ func (c *Collection) forEachDocumentLocked(fn func(id string, doc map[string]int
 		}
 	}
 	return nil
+}
+
+func (c *Collection) readDocCached(id string) (map[string]interface{}, error) {
+	if doc, ok := c.cacheGet(id); ok {
+		return doc, nil
+	}
+	doc, err := c.readDocByID(id)
+	if err != nil {
+		return nil, err
+	}
+	c.cachePut(id, doc)
+	return doc, nil
 }
 
 func (c *Collection) readDocByID(id string) (map[string]interface{}, error) {
@@ -437,7 +581,13 @@ func (c *Collection) readSegDoc(id string) (map[string]interface{}, error) {
 	if !ok {
 		return nil, fmt.Errorf("document not found")
 	}
-	raw, err := readAtSegment(segmentPath(c.segDir, loc.Seg), loc.Offset, loc.Length)
+	var raw []byte
+	var err error
+	if c.readers != nil {
+		raw, err = c.readers.readAt(loc.Seg, loc.Offset, loc.Length)
+	} else {
+		raw, err = readAtSegment(segmentPath(c.segDir, loc.Seg), loc.Offset, loc.Length)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -531,7 +681,10 @@ func (c *Collection) CreateIndex(field string) error {
 	}
 	c.indexes[field] = idx
 	idxPath := filepath.Join(c.dir, "indexes", field+".idx")
-	return idx.Save(idxPath, c.encKey)
+	if err := idx.Save(idxPath, c.encKey); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (c *Collection) DropIndex(field string) error {
@@ -548,4 +701,133 @@ func (c *Collection) DropIndex(field string) error {
 
 func trimIdxFieldName(idxFileName string) string {
 	return strings.TrimSuffix(idxFileName, ".idx")
+}
+
+// Compact rewrites all live documents into fresh segment files and drops
+// orphaned payloads left by updates/deletes. Safe to call concurrently with
+// the meta flusher (takes the write lock).
+func (c *Collection) Compact() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.compactLocked()
+}
+
+func (c *Collection) maybeCompactLocked() error {
+	live := c.docIndex.ApproximateBytes()
+	nums, err := listSegmentNumbers(c.segDir)
+	if err != nil || len(nums) == 0 {
+		return err
+	}
+	var total int64
+	for _, n := range nums {
+		total += fileSize(segmentPath(c.segDir, n))
+	}
+	if total < CompactMinSegmentBytes || live*2 >= total {
+		return nil
+	}
+	return c.compactLocked()
+}
+
+func (c *Collection) compactLocked() error {
+	ids := c.docIndex.LiveIDs()
+	if len(ids) == 0 {
+		// Drop empty segments except keep a fresh writable one.
+		oldNums, _ := listSegmentNumbers(c.segDir)
+		if c.curFile != nil {
+			_ = c.curFile.Close()
+			c.curFile = nil
+		}
+		c.readers.closeAll()
+		for _, n := range oldNums {
+			_ = os.Remove(segmentPath(c.segDir, n))
+		}
+		c.curSeg = 1
+		f, err := openAppend(segmentPath(c.segDir, c.curSeg))
+		if err != nil {
+			return err
+		}
+		c.curFile = f
+		c.curSize = 0
+		c.docIndex.dirty = true
+		return c.docIndex.Save()
+	}
+
+	// Read all live docs first (from old segments / cache / legacy).
+	type liveDoc struct {
+		id  string
+		doc map[string]interface{}
+	}
+	lives := make([]liveDoc, 0, len(ids))
+	for _, id := range ids {
+		doc, err := c.readDocByID(id)
+		if err != nil {
+			continue
+		}
+		lives = append(lives, liveDoc{id: id, doc: doc})
+	}
+
+	oldNums, err := listSegmentNumbers(c.segDir)
+	if err != nil {
+		return err
+	}
+	if c.curFile != nil {
+		_ = c.curFile.Sync()
+		_ = c.curFile.Close()
+		c.curFile = nil
+	}
+	c.readers.closeAll()
+
+	// Start writing into a new segment number past the old ones.
+	var next uint32 = 1
+	for _, n := range oldNums {
+		if n >= next {
+			next = n + 1
+		}
+	}
+	c.curSeg = next
+	f, err := openAppend(segmentPath(c.segDir, c.curSeg))
+	if err != nil {
+		return err
+	}
+	c.curFile = f
+	c.curSize = 0
+
+	newIndex := newDocIndex(c.docIndex.path, c.encKey)
+	for _, ld := range lives {
+		data, err := encodeDocument(c.encKey, ld.doc)
+		if err != nil {
+			return err
+		}
+		loc, err := c.appendDocLocked(data)
+		if err != nil {
+			return err
+		}
+		newIndex.Put(ld.id, loc)
+		c.cachePut(ld.id, ld.doc)
+	}
+	newIndex.dirty = true
+	c.docIndex = newIndex
+	if err := c.docIndex.Save(); err != nil {
+		return err
+	}
+	if err := c.curFile.Sync(); err != nil {
+		return err
+	}
+
+	// Remove old segment files (not the ones we just wrote).
+	written := make(map[uint32]struct{})
+	for _, loc := range c.docIndex.locs {
+		if !loc.Dead {
+			written[loc.Seg] = struct{}{}
+		}
+	}
+	written[c.curSeg] = struct{}{}
+	for _, n := range oldNums {
+		if _, keep := written[n]; keep {
+			continue
+		}
+		_ = os.Remove(segmentPath(c.segDir, n))
+		c.readers.drop(n)
+	}
+	return nil
 }

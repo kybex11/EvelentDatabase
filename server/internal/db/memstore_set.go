@@ -26,8 +26,8 @@ func (m *MemStore) setForRead(key string) (*Value, bool, error) {
 
 // SAdd adds members to the set at key and returns how many were newly added.
 func (m *MemStore) SAdd(key string, members ...string) (int, error) {
-	m.opMu.Lock()
-	defer m.opMu.Unlock()
+	unlock := m.lockKey(key)
+	defer unlock()
 	v, err := m.setForWrite(key)
 	if err != nil {
 		return 0, err
@@ -46,8 +46,8 @@ func (m *MemStore) SAdd(key string, members ...string) (int, error) {
 // SRem removes members from the set and returns how many were removed. The key
 // is deleted when the last member is removed.
 func (m *MemStore) SRem(key string, members ...string) (int, error) {
-	m.opMu.Lock()
-	defer m.opMu.Unlock()
+	unlock := m.lockKey(key)
+	defer unlock()
 	cur, ok, err := m.setForRead(key)
 	if err != nil || !ok {
 		return 0, err

@@ -16,5 +16,6 @@ data/
 server/data/
 **/data/.key
 **/.kvstore
+mongo
 
 */package-lock.json

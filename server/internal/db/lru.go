@@ -15,10 +15,9 @@ type lruEntry struct {
 }
 
 // LRU is a concurrency-safe, capacity-bounded cache with optional per-entry
-// TTL. It is the shared in-memory primitive behind both the document hot-cache
-// and the Redis-like key/value store. Bounds can be set on item count, on the
-// approximate byte size, or both. When a bound is exceeded the least recently
-// used entries are evicted.
+// TTL. It backs the Redis-like key/value store and per-collection hot document
+// caches. Bounds can be set on item count, on the approximate byte size, or
+// both. When a bound is exceeded the least recently used entries are evicted.
 type LRU struct {
 	mu       sync.Mutex
 	maxItems int

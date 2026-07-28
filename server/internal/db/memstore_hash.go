@@ -3,8 +3,8 @@ package db
 import "strconv"
 
 // Hash operations — a key holding a map of field -> value, like a Redis hash.
-// All mutations are atomic (guarded by opMu) and copy-on-write so the object
-// held by the cache is never mutated in place.
+// All mutations are atomic (guarded by per-key striped locks) and copy-on-write
+// so the object held by the cache is never mutated in place.
 
 func (m *MemStore) hashForWrite(key string) (*Value, error) {
 	if v, ok := m.getValue(key); ok {
@@ -30,8 +30,8 @@ func (m *MemStore) hashForRead(key string) (*Value, bool, error) {
 // HSet sets field to value in the hash at key, creating the hash if needed.
 // Returns the number of newly created fields (0 if the field already existed).
 func (m *MemStore) HSet(key, field, value string) (int, error) {
-	m.opMu.Lock()
-	defer m.opMu.Unlock()
+	unlock := m.lockKey(key)
+	defer unlock()
 	v, err := m.hashForWrite(key)
 	if err != nil {
 		return 0, err
@@ -47,8 +47,8 @@ func (m *MemStore) HSet(key, field, value string) (int, error) {
 
 // HSetMany sets multiple fields at once and returns the number of new fields.
 func (m *MemStore) HSetMany(key string, fields map[string]string) (int, error) {
-	m.opMu.Lock()
-	defer m.opMu.Unlock()
+	unlock := m.lockKey(key)
+	defer unlock()
 	v, err := m.hashForWrite(key)
 	if err != nil {
 		return 0, err
@@ -90,8 +90,8 @@ func (m *MemStore) HGetAll(key string) (map[string]string, error) {
 // HDel removes fields from the hash and returns how many were removed. The key
 // is deleted entirely when the last field is removed.
 func (m *MemStore) HDel(key string, fields ...string) (int, error) {
-	m.opMu.Lock()
-	defer m.opMu.Unlock()
+	unlock := m.lockKey(key)
+	defer unlock()
 	cur, ok, err := m.hashForRead(key)
 	if err != nil || !ok {
 		return 0, err
@@ -147,8 +147,8 @@ func (m *MemStore) HExists(key, field string) (bool, error) {
 
 // HIncrBy atomically adds delta to the integer field in the hash at key.
 func (m *MemStore) HIncrBy(key, field string, delta int64) (int64, error) {
-	m.opMu.Lock()
-	defer m.opMu.Unlock()
+	unlock := m.lockKey(key)
+	defer unlock()
 	v, err := m.hashForWrite(key)
 	if err != nil {
 		return 0, err

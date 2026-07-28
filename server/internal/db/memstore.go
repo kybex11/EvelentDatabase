@@ -8,6 +8,8 @@ import (
 	"time"
 )
 
+const memOpStripes = 64
+
 // MemStore is a built-in, Redis-like in-memory key/value store. It keeps string
 // values in a bounded LRU cache with optional per-key TTL and persists its
 // contents to an encrypted snapshot on disk so data survives restarts.
@@ -21,11 +23,17 @@ type MemStore struct {
 	encKey       []byte
 
 	mu        sync.Mutex
-	opMu      sync.Mutex // serializes read-modify-write on typed values
+	opStripes [memOpStripes]sync.Mutex // striped RMW locks (Incr, hash/list/set, …)
 	stopCh    chan struct{}
 	stopped   bool
 	dirty     bool
 	flushEach time.Duration
+}
+
+func (m *MemStore) lockKey(key string) func() {
+	mu := &m.opStripes[fnv32a(key)&(memOpStripes-1)]
+	mu.Lock()
+	return mu.Unlock
 }
 
 // MemStoreConfig controls the in-memory store bounds and persistence.
@@ -150,8 +158,8 @@ func (m *MemStore) Expire(key string, ttl time.Duration) bool {
 // Incr atomically increments the integer value stored at key by delta,
 // creating it at 0 when absent. Returns the new value.
 func (m *MemStore) Incr(key string, delta int64) (int64, error) {
-	m.opMu.Lock()
-	defer m.opMu.Unlock()
+	unlock := m.lockKey(key)
+	defer unlock()
 	cur := int64(0)
 	if v, ok := m.Get(key); ok {
 		n, err := strconv.ParseInt(v, 10, 64)

@@ -11,7 +11,19 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 )
+
+// aeadCache reuses AES-GCM instances per 32-byte key so hot paths skip
+// aes.NewCipher + cipher.NewGCM on every document encode/decode.
+var aeadCache sync.Map // string(key) → cipher.AEAD
+
+var noncePool = sync.Pool{
+	New: func() interface{} {
+		b := make([]byte, 12) // AES-GCM standard nonce size
+		return &b
+	},
+}
 
 func EnsureEncryptionKey(rootDir string) ([]byte, error) {
 	if s := os.Getenv("DB_ENCRYPTION_KEY"); s != "" {
@@ -48,7 +60,14 @@ func looksLikeJSON(data []byte) bool {
 	return s[0] == '{' || s[0] == '['
 }
 
-func encryptAESGCM(key, plaintext []byte) ([]byte, error) {
+func getAEAD(key []byte) (cipher.AEAD, error) {
+	if len(key) != 32 {
+		return nil, fmt.Errorf("missing encryption key")
+	}
+	cacheKey := string(key)
+	if v, ok := aeadCache.Load(cacheKey); ok {
+		return v.(cipher.AEAD), nil
+	}
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, err
@@ -57,19 +76,38 @@ func encryptAESGCM(key, plaintext []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+	actual, _ := aeadCache.LoadOrStore(cacheKey, gcm)
+	return actual.(cipher.AEAD), nil
+}
+
+func encryptAESGCM(key, plaintext []byte) ([]byte, error) {
+	gcm, err := getAEAD(key)
+	if err != nil {
 		return nil, err
 	}
-	return gcm.Seal(nonce, nonce, plaintext, nil), nil
+	ns := gcm.NonceSize()
+	noncePtr := noncePool.Get().(*[]byte)
+	nonce := *noncePtr
+	if cap(nonce) < ns {
+		nonce = make([]byte, ns)
+		*noncePtr = nonce
+	}
+	nonce = nonce[:ns]
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		noncePool.Put(noncePtr)
+		return nil, err
+	}
+	out := gcm.Seal(nil, nonce, plaintext, nil)
+	// Prepend nonce: [nonce|ciphertext+tag]
+	blob := make([]byte, 0, ns+len(out))
+	blob = append(blob, nonce...)
+	blob = append(blob, out...)
+	noncePool.Put(noncePtr)
+	return blob, nil
 }
 
 func decryptAESGCM(key, ciphertext []byte) ([]byte, error) {
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-	gcm, err := cipher.NewGCM(block)
+	gcm, err := getAEAD(key)
 	if err != nil {
 		return nil, err
 	}

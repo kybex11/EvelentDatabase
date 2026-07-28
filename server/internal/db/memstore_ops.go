@@ -12,8 +12,8 @@ import (
 // SetNX stores value under key only when the key does not already exist. It
 // reports whether the write happened.
 func (m *MemStore) SetNX(key, value string, ttl time.Duration) bool {
-	m.opMu.Lock()
-	defer m.opMu.Unlock()
+	unlock := m.lockKey(key)
+	defer unlock()
 	if m.Exists(key) {
 		return false
 	}
@@ -23,8 +23,8 @@ func (m *MemStore) SetNX(key, value string, ttl time.Duration) bool {
 
 // GetSet atomically sets key to value and returns the previous value (if any).
 func (m *MemStore) GetSet(key, value string, ttl time.Duration) (prev string, existed bool) {
-	m.opMu.Lock()
-	defer m.opMu.Unlock()
+	unlock := m.lockKey(key)
+	defer unlock()
 	prev, existed = m.Get(key)
 	m.Set(key, value, ttl)
 	return prev, existed
@@ -33,8 +33,8 @@ func (m *MemStore) GetSet(key, value string, ttl time.Duration) (prev string, ex
 // Append concatenates value to the existing string at key (creating it when
 // absent) and returns the new length. The key's TTL is preserved.
 func (m *MemStore) Append(key, value string) int {
-	m.opMu.Lock()
-	defer m.opMu.Unlock()
+	unlock := m.lockKey(key)
+	defer unlock()
 	cur, _ := m.Get(key)
 	next := cur + value
 	ttl := m.remainingTTL(key)
@@ -107,8 +107,8 @@ func (m *MemStore) DeleteMany(keys []string) int {
 
 // IncrByFloat atomically adds a floating-point delta to the value at key.
 func (m *MemStore) IncrByFloat(key string, delta float64) (float64, error) {
-	m.opMu.Lock()
-	defer m.opMu.Unlock()
+	unlock := m.lockKey(key)
+	defer unlock()
 	cur := float64(0)
 	if v, ok := m.Get(key); ok {
 		n, err := strconv.ParseFloat(v, 64)

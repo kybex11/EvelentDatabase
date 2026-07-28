@@ -9,17 +9,10 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 const MaxSegmentBytes int64 = 64 << 20 // 64 MiB
-
-func segmentFileName(n uint32) string {
-	return fmt.Sprintf("%06d.seg", n)
-}
-
-func segmentPath(segDir string, n uint32) string {
-	return filepath.Join(segDir, segmentFileName(n))
-}
 
 // appendEncrypted appends a length-prefixed ciphertext record and returns the
 // payload offset/length (not including the 4-byte length header).
@@ -57,6 +50,81 @@ func readAtSegment(path string, offset int64, length uint32) ([]byte, error) {
 		return nil, err
 	}
 	return buf, nil
+}
+
+// segReaders caches open read-only FDs for segment files so hot Get/Find paths
+// do not pay os.Open on every document read.
+type segReaders struct {
+	mu    sync.Mutex
+	files map[uint32]*os.File
+	dir   string
+}
+
+func newSegReaders(dir string) *segReaders {
+	return &segReaders{
+		files: make(map[uint32]*os.File),
+		dir:   dir,
+	}
+}
+
+func (r *segReaders) readAt(seg uint32, offset int64, length uint32) ([]byte, error) {
+	f, err := r.open(seg)
+	if err != nil {
+		return nil, err
+	}
+	buf := make([]byte, length)
+	if _, err := f.ReadAt(buf, offset); err != nil {
+		// Stale FD (file replaced by compaction): drop and retry once.
+		r.drop(seg)
+		f, err = r.open(seg)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := f.ReadAt(buf, offset); err != nil {
+			return nil, err
+		}
+	}
+	return buf, nil
+}
+
+func (r *segReaders) open(seg uint32) (*os.File, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if f, ok := r.files[seg]; ok {
+		return f, nil
+	}
+	f, err := os.Open(segmentPath(r.dir, seg))
+	if err != nil {
+		return nil, err
+	}
+	r.files[seg] = f
+	return f, nil
+}
+
+func (r *segReaders) drop(seg uint32) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if f, ok := r.files[seg]; ok {
+		_ = f.Close()
+		delete(r.files, seg)
+	}
+}
+
+func (r *segReaders) closeAll() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for n, f := range r.files {
+		_ = f.Close()
+		delete(r.files, n)
+	}
+}
+
+func segmentFileName(n uint32) string {
+	return fmt.Sprintf("%06d.seg", n)
+}
+
+func segmentPath(segDir string, n uint32) string {
+	return filepath.Join(segDir, segmentFileName(n))
 }
 
 func listSegmentNumbers(segDir string) ([]uint32, error) {

@@ -26,8 +26,8 @@ func (m *MemStore) listForRead(key string) (*Value, bool, error) {
 
 // LPush prepends values to the head of the list (left). Returns the new length.
 func (m *MemStore) LPush(key string, values ...string) (int, error) {
-	m.opMu.Lock()
-	defer m.opMu.Unlock()
+	unlock := m.lockKey(key)
+	defer unlock()
 	v, err := m.listForWrite(key)
 	if err != nil {
 		return 0, err
@@ -45,8 +45,8 @@ func (m *MemStore) LPush(key string, values ...string) (int, error) {
 
 // RPush appends values to the tail of the list (right). Returns the new length.
 func (m *MemStore) RPush(key string, values ...string) (int, error) {
-	m.opMu.Lock()
-	defer m.opMu.Unlock()
+	unlock := m.lockKey(key)
+	defer unlock()
 	v, err := m.listForWrite(key)
 	if err != nil {
 		return 0, err
@@ -67,8 +67,8 @@ func (m *MemStore) RPop(key string) (string, bool, error) {
 }
 
 func (m *MemStore) pop(key string, head bool) (string, bool, error) {
-	m.opMu.Lock()
-	defer m.opMu.Unlock()
+	unlock := m.lockKey(key)
+	defer unlock()
 	cur, ok, err := m.listForRead(key)
 	if err != nil || !ok || len(cur.List) == 0 {
 		return "", false, err

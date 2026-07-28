@@ -17,9 +17,9 @@ export function FindDocuments(arg1:string,arg2:Record<string, any>):Promise<Arra
 
 export function FindDocumentsQuery(arg1:string,arg2:Record<string, any>):Promise<Array<Record<string, any>>>;
 
-export function GetDocument(arg1:string,arg2:string):Promise<Record<string, any>>;
-
 export function GetAPIKey():Promise<string>;
+
+export function GetDocument(arg1:string,arg2:string):Promise<Record<string, any>>;
 
 export function GetServerURL():Promise<string>;
 

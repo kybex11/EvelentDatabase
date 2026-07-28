@@ -34,12 +34,12 @@ export function FindDocumentsQuery(arg1, arg2) {
   return window['go']['main']['App']['FindDocumentsQuery'](arg1, arg2);
 }
 
-export function GetDocument(arg1, arg2) {
-  return window['go']['main']['App']['GetDocument'](arg1, arg2);
-}
-
 export function GetAPIKey() {
   return window['go']['main']['App']['GetAPIKey']();
+}
+
+export function GetDocument(arg1, arg2) {
+  return window['go']['main']['App']['GetDocument'](arg1, arg2);
 }
 
 export function GetServerURL() {

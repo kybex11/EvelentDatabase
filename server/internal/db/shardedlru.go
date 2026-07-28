@@ -1,7 +1,6 @@
 package db
 
 import (
-	"hash/fnv"
 	"runtime"
 	"time"
 )
@@ -94,10 +93,18 @@ func NewShardedLRU(shardCount, maxItems int, maxBytes int64) *ShardedLRU {
 	return s
 }
 
+// fnv32a hashes s without allocating (unlike hash/fnv.New32a).
+func fnv32a(s string) uint32 {
+	var h uint32 = 2166136261
+	for i := 0; i < len(s); i++ {
+		h ^= uint32(s[i])
+		h *= 16777619
+	}
+	return h
+}
+
 func (s *ShardedLRU) shardFor(key string) *LRU {
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(key))
-	return s.shards[h.Sum32()&s.mask]
+	return s.shards[fnv32a(key)&s.mask]
 }
 
 func (s *ShardedLRU) Get(key string) (interface{}, bool) {
