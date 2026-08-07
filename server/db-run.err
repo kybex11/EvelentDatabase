@@ -1,0 +1,4 @@
+2026/07/31 20:42:12 NOTICE: No API key configured. Safe only because bind is loopback. Set -api-key for any shared/proxied use.
+2026/07/31 20:42:12 Starting server on 127.0.0.1:8080 (loopback=true, apiKey=false, syncMode=none, metaCacheMB=256)
+2026/07/31 20:42:12 Data directory: ./data-forum
+2026/07/31 20:42:12 GOMAXPROCS = 12
