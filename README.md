@@ -1,4 +1,5 @@
 # Evelent DB
+В данном репозитории более коммитов не будет. Проект перешел в приватный режим разработки 
 
 An embeddable, encrypted document database with a built-in, Redis-like
 in-memory store. It speaks plain HTTP/JSON, ships first-class SDKs for **Go**
